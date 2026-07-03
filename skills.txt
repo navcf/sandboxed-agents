@@ -1,0 +1,13 @@
+# Skill sources staged into the image by stage.sh.
+# Each non-comment line is passed as arguments to `npx skills add <line> -a claude-code -y --copy`
+# (see https://vercel.com/docs/agent-resources/skills). Any source format the skills
+# CLI accepts works: owner/repo, GitHub/GitLab URLs (pin with /tree/<sha>), git URLs,
+# local paths (./ and ../ resolve relative to this directory; ~ expands to your
+# home). Use -s to pick skills from multi-skill repos ('*' for all).
+
+anthropics/skills -s '*'
+mattpocock/skills -s '*'
+multica-ai/andrej-karpathy-skills -s '*'
+davebcn87/pi-autoresearch -s '*'
+../.ai/skills -s '*'
+./skills-local
