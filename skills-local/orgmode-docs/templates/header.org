@@ -1,0 +1,6 @@
+#+TITLE: Document Title
+#+AUTHOR: Author Name
+# Keep under_scores and x^2 literal (no sub/superscripts) in ALL exporters:
+#+OPTIONS: ^:nil
+# Shareable-document defaults: no section numbers, keep the TOC:
+#+OPTIONS: num:nil toc:t
