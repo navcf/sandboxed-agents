@@ -31,3 +31,8 @@ sandbox; if the index is stale, ask the user to re-analyze on the host.
 If the gitnexus MCP server is unreachable, the host server is likely not
 running; ask the user to start it (`host-gitnexus.sh` on the host) instead of
 retrying.
+
+## Orgmode
+
+Write all plans in /Users/nav/Documents/Notes in Orgmode format. Do not use markdown, 
+txt, or any other format. 
