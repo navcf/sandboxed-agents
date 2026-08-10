@@ -4,4 +4,5 @@
 # Re-asserts config that sbx clobbers when it re-seeds ~/.claude.json at
 # sandbox creation, then hands off to the real claude.
 node /usr/local/share/sbx/gitnexus-mcp.cjs || echo 'warn: gitnexus MCP registration failed' >&2
+node /usr/local/share/sbx/claude-settings-merge.cjs || echo 'warn: settings merge failed' >&2
 exec /home/agent/.local/bin/claude-real "$@"

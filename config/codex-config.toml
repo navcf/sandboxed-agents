@@ -1,0 +1,12 @@
+# sandboxed-agents: custom Codex settings
+# Appended to ~/.codex/config.toml at every launch, guarded on the marker
+# line above — keep it as the first line of this file.
+#
+# sbx seeds approval_policy, sandbox_mode, and mcp_oauth_credentials_store at
+# sandbox creation — do NOT set those here: TOML rejects duplicate keys and
+# codex would fail to parse its config.
+#
+# Examples (see https://github.com/openai/codex/blob/main/docs/config.md):
+# model = "gpt-5-codex"
+# model_reasoning_effort = "high"
+# hide_agent_reasoning = true

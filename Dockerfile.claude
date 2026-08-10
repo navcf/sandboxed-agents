@@ -1,6 +1,7 @@
 # Custom Docker Sandboxes template for Claude Code.
-# Build via ./build.sh (runs stage.sh first to populate build/.claude/skills
-# via the Vercel skills CLI). Everything is baked at build time.
+# Build via ./build.sh claude (runs stage.sh first to populate
+# build/claude/.claude/skills via the Vercel skills CLI). Everything is baked
+# at build time.
 
 FROM docker/sandbox-templates:claude-code AS rtk
 USER root
@@ -14,8 +15,10 @@ USER root
 COPY --from=rtk /usr/local/bin/rtk /usr/local/bin/rtk
 
 # Sandboxes do NOT sync host ~/.claude — global config and skills must live in the image.
-COPY --chown=agent:agent build/.claude/skills /home/agent/.claude/skills
+COPY --chown=agent:agent build/claude/.claude/skills /home/agent/.claude/skills
 COPY --chown=agent:agent config/CLAUDE.md /home/agent/.claude/CLAUDE.md
+# Custom settings baked before rtk init patches its hooks into the same file.
+COPY --chown=agent:agent config/claude-settings.json /home/agent/.claude/settings.json
 
 # sbx re-seeds ~/.claude.json at sandbox creation, clobbering anything baked at
 # build time. Claude is a native install whose launcher symlink lives at
@@ -23,6 +26,7 @@ COPY --chown=agent:agent config/CLAUDE.md /home/agent/.claude/CLAUDE.md
 # re-asserts the gitnexus MCP registration just before the real binary launches.
 # The mv fails the build loudly if the base image ever relocates the launcher.
 COPY config/gitnexus-mcp.cjs /usr/local/share/sbx/gitnexus-mcp.cjs
+COPY config/claude-settings-merge.cjs /usr/local/share/sbx/claude-settings-merge.cjs
 RUN mv /home/agent/.local/bin/claude /home/agent/.local/bin/claude-real
 COPY --chown=agent:agent --chmod=755 claude-shim.sh /home/agent/.local/bin/claude
 
@@ -36,3 +40,11 @@ RUN rtk init --global --auto-patch
 # Register gitnexus at build time too — covers any launch path that bypasses the
 # shim while ~/.claude.json is still the baked one.
 RUN node /usr/local/share/sbx/gitnexus-mcp.cjs
+
+# Snapshot the final build-time settings (custom settings + rtk hooks) as the
+# launch-time merge source: sbx rewrites ~/.claude/settings.json at sandbox
+# (re)create, so the shim re-merges this snapshot on every launch. As root:
+# /usr/local/share/sbx is root-owned.
+USER root
+RUN install -m 644 /home/agent/.claude/settings.json /usr/local/share/sbx/claude-settings.json
+USER agent

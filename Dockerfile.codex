@@ -1,0 +1,47 @@
+# Custom Docker Sandboxes template for Codex.
+# Build via ./build.sh codex (runs stage.sh first to populate
+# build/codex/.agents/skills via the Vercel skills CLI). Everything is baked
+# at build time.
+
+FROM docker/sandbox-templates:codex AS rtk
+USER root
+ENV RTK_INSTALL_DIR=/usr/local/bin
+RUN curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/refs/heads/master/install.sh | sh \
+    # Fail the build here if the installer ignored RTK_INSTALL_DIR.
+    && /usr/local/bin/rtk --version
+
+FROM docker/sandbox-templates:codex
+USER root
+COPY --from=rtk /usr/local/bin/rtk /usr/local/bin/rtk
+
+# Bake skills into codex's GLOBAL skills dir (~/.codex/skills). NOT
+# ~/.agents/skills: sbx mounts the shared skills store there at create,
+# shadowing anything baked. Global instructions live at ~/.codex/AGENTS.md.
+COPY --chown=agent:agent build/codex/.agents/skills /home/agent/.codex/skills
+COPY --chown=agent:agent config/AGENTS.md /home/agent/.codex/AGENTS.md
+
+# sbx seeds ~/.codex/config.toml unconditionally at sandbox (re)create,
+# clobbering anything baked at build time. The sbx manifest launches bare
+# `codex` and /home/agent/.local/bin precedes the npm-global bin dir on PATH,
+# so a shim there wins without moving the real binary. Assert the real
+# binary's location so the build fails loudly if the base image relocates it.
+COPY config/gitnexus-mcp-codex.sh /usr/local/share/sbx/gitnexus-mcp-codex.sh
+COPY config/codex-settings.sh /usr/local/share/sbx/codex-settings.sh
+COPY config/codex-config.toml /usr/local/share/sbx/codex-config.toml
+RUN test -x /usr/local/share/npm-global/bin/codex \
+    && install -d -o agent -g agent /home/agent/.local /home/agent/.local/bin
+COPY --chown=agent:agent --chmod=755 codex-shim.sh /home/agent/.local/bin/codex
+
+USER agent
+# Classic builder does not derive HOME from USER; the script below needs it.
+ENV HOME=/home/agent
+
+# rtk has no codex integration (`rtk init` only targets Claude Code) — the
+# binary ships with prose guidance in AGENTS.md; no hooks.
+
+# Register gitnexus + custom settings at build time too — smoke-tests the
+# appenders and covers any launch path that bypasses the shim while
+# ~/.codex/config.toml is still the baked one (sbx clobbers it at create; the
+# shim re-asserts both at every launch).
+RUN sh /usr/local/share/sbx/gitnexus-mcp-codex.sh \
+    && sh /usr/local/share/sbx/codex-settings.sh

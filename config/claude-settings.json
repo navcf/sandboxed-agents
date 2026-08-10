@@ -1,0 +1,14 @@
+{
+   "attribution": {
+    "commit": "",
+    "pr": "",
+    "sessionUrl": false
+  },
+  "permissions": {
+    "allow": [],
+    "deny": []
+  },
+  "env": {
+    "MCP_TOOL_TIMEOUT": "900000"
+  }
+}

@@ -5,9 +5,9 @@ absolute path as on the host.
 
 ## RTK — Rust Token Killer
 
-Token-optimized CLI proxy (60-90% savings on dev operations). Hooks are
-pre-configured; commands like `git status` are rewritten to `rtk git status`
-transparently.
+Token-optimized CLI proxy (60-90% savings on dev operations). No hooks are
+wired for Codex — prefix high-volume commands yourself: `rtk git status`,
+`rtk git diff`, `rtk grep <pattern>`, and so on.
 
 - `rtk gain` — show token savings analytics
 - `rtk proxy <cmd>` — execute a raw command without filtering (for debugging)
@@ -49,5 +49,3 @@ the user rather than retrying.
 
 Write all plans in /Users/nav/Documents/Notes in Orgmode format. Do not use markdown, 
 txt, or any other format. 
-
-

@@ -1,0 +1,48 @@
+# Custom Docker Sandboxes template for Cursor (cursor-agent).
+# Build via ./build.sh cursor (runs stage.sh first to populate
+# build/cursor/.cursor/skills via the Vercel skills CLI). Everything is baked
+# at build time.
+
+FROM docker/sandbox-templates:cursor-agent AS rtk
+USER root
+ENV RTK_INSTALL_DIR=/usr/local/bin
+RUN curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/refs/heads/master/install.sh | sh \
+    # Fail the build here if the installer ignored RTK_INSTALL_DIR.
+    && /usr/local/bin/rtk --version
+
+FROM docker/sandbox-templates:cursor-agent
+USER root
+COPY --from=rtk /usr/local/bin/rtk /usr/local/bin/rtk
+
+# cursor-agent has no global instructions file (it reads AGENTS.md/CLAUDE.md
+# at the project root only), so nothing like ~/.claude/CLAUDE.md is baked.
+# Skills bake to cursor's global skills dir. Create sandboxes with
+# --no-share-skills or sbx mounts its shared store over this path (see README).
+COPY --chown=agent:agent build/cursor/.agents/skills /home/agent/.cursor/skills
+# Custom settings. sbx's own cli-config seed is onlyIfMissing, so this baked
+# file survives sandbox creation — but it MUST keep network.useHttp1ForAgent,
+# which sbx would otherwise seed (agent traffic must go through the proxy).
+COPY --chown=agent:agent config/cursor-cli-config.json /home/agent/.cursor/cli-config.json
+
+# No shim, unlike claude/codex: sbx's cursor manifest seeds only
+# cli-config.json (onlyIfMissing) and never rewrites an MCP config, so the
+# baked ~/.cursor/mcp.json survives sandbox creation. The launcher at
+# /home/agent/.local/bin/cursor-agent is an auto-update-managed symlink —
+# intercepting it would be fragile for no benefit. Assert it exists so the
+# build fails loudly if the base image ever relocates it. The merge script
+# ships for manual re-assertion (troubleshooting).
+COPY config/gitnexus-mcp-cursor.cjs /usr/local/share/sbx/gitnexus-mcp-cursor.cjs
+RUN test -x /home/agent/.local/bin/cursor-agent
+
+USER agent
+# Classic builder does not derive HOME from USER; rtk/node below need it.
+ENV HOME=/home/agent
+
+# Wire RTK's cursor hooks into ~/.cursor/hooks.json. rtk init also writes
+# claude-side files (~/.claude/RTK.md) unconditionally and errors if the dir
+# is missing — pre-create it; the files are inert in this image.
+RUN mkdir -p /home/agent/.claude /home/agent/.cursor \
+    && rtk init --global --agent cursor
+
+# Register gitnexus at build time — sbx does not clobber this for cursor.
+RUN node /usr/local/share/sbx/gitnexus-mcp-cursor.cjs

@@ -1,14 +1,27 @@
 #!/usr/bin/env sh
-# Stage skills, build the template image, and push it to Docker Hub.
+# Stage skills, build the template image(s), and push to Docker Hub.
+# Usage: ./build.sh [claude|codex|cursor|all]   (default: all)
+# IMAGE=... overrides the image ref for single-agent builds.
 set -eu
 cd "$(dirname "$0")"
 
-IMAGE=${IMAGE:-docker.io/navcf/sandbox-templates:claude-code}
+AGENTS=${1:-all}
+[ "$AGENTS" = all ] && AGENTS='claude codex cursor'
 
-./stage.sh
-docker build -t "$IMAGE" .
-docker push "$IMAGE"
+for agent in $AGENTS; do
+  case $agent in
+    claude) tag=claude-code ;;
+    codex)  tag=codex ;;
+    cursor) tag=cursor-agent ;;
+    *) echo "usage: ./build.sh [claude|codex|cursor|all]" >&2; exit 2 ;;
+  esac
+  image=${IMAGE:-docker.io/navcf/sandbox-templates:$tag}
 
-echo
-echo "Create a sandbox with:"
-echo "  sbx create -t $IMAGE claude /path/to/workspace"
+  ./stage.sh "$agent"
+  docker build -f "Dockerfile.$agent" -t "$image" .
+  docker push "$image"
+
+  echo
+  echo "Create a sandbox with:"
+  echo "  sbx create -t $image $agent /path/to/workspace"
+done
