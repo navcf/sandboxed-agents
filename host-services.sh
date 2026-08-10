@@ -148,6 +148,20 @@ http
         return;
       }
       if (msg.id === undefined || msg.id === null) { res.writeHead(202).end(); return; } // notification
+      if (msg.method === 'tools/call') {
+        // Long-running calls (reviews take minutes) answered as an SSE stream
+        // with heartbeat comments: the sandbox egress proxy drops HTTP
+        // connections that stay idle for minutes, which lost completed
+        // reviews and surfaced as silent client-side timeouts.
+        res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive' });
+        const hb = setInterval(() => res.write(': keepalive\n\n'), 15000);
+        req.on('close', () => clearInterval(hb));
+        const reply = await handle(msg);
+        clearInterval(hb);
+        res.write(`event: message\ndata: ${JSON.stringify(reply)}\n\n`);
+        res.end();
+        return;
+      }
       const reply = await handle(msg);
       res.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify(reply));
     });
