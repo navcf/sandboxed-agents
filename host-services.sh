@@ -35,11 +35,11 @@ const PORT = Number(process.env.AGENT_BRIDGE_PORT || 4748);
 
 // Headless invocations. The prompt is piped via stdin for claude (argv-free)
 // and passed as a verbatim argv element otherwise — sbx exec does not go
-// through a shell, so no quoting issues.
+// through a shell, so no quoting issues. All three CLIs take a model flag.
 const AGENTS = {
-  claude: (prompt) => ({ argv: ['claude', '--dangerously-skip-permissions', '-p'], stdin: prompt }),
-  codex:  (prompt) => ({ argv: ['codex', 'exec', '--skip-git-repo-check', prompt] }),
-  cursor: (prompt) => ({ argv: ['cursor-agent', '-p', prompt, '--output-format', 'text'] }),
+  claude: (prompt, model) => ({ argv: ['claude', '--dangerously-skip-permissions', ...(model ? ['--model', model] : []), '-p'], stdin: prompt }),
+  codex:  (prompt, model) => ({ argv: ['codex', 'exec', '--skip-git-repo-check', ...(model ? ['--model', model] : []), prompt] }),
+  cursor: (prompt, model) => ({ argv: ['cursor-agent', '-p', prompt, '--output-format', 'text', ...(model ? ['--model', model] : [])] }),
 };
 
 const TOOL = {
@@ -57,6 +57,7 @@ const TOOL = {
       prompt: { type: 'string', description: 'The full task, self-contained: what to do, which files/commits/diffs to look at, and what to return.' },
       workdir: { type: 'string', description: 'Absolute path of the shared workspace (your workspace root). Used to find the peer\'s sandbox.' },
       sandbox: { type: 'string', description: 'Optional explicit sandbox name; overrides workdir-based lookup.' },
+      model: { type: 'string', description: 'Optional model for the peer, in that agent\'s own naming (e.g. cursor: "gpt-5.3-codex-high", "composer-2.5", see `cursor-agent models`; claude: "opus", "sonnet"; codex: "gpt-5-codex"). Omit for the agent\'s default.' },
       timeout_seconds: { type: 'number', description: 'Max seconds to wait (default 600).' },
     },
     required: ['agent', 'prompt', 'workdir'],
@@ -88,10 +89,10 @@ async function resolveSandbox(agent, workdir) {
     `Create one with: sbx run --no-share-skills -t docker.io/navcf/sandbox-templates:<tag> ${agent} (from the workspace dir), or pass sandbox explicitly.`);
 }
 
-async function askAgent({ agent, prompt, workdir, sandbox, timeout_seconds }) {
+async function askAgent({ agent, prompt, workdir, sandbox, model, timeout_seconds }) {
   if (!AGENTS[agent]) throw new Error(`unknown agent ${agent}; use claude, codex, or cursor`);
   const name = sandbox || (await resolveSandbox(agent, workdir));
-  const { argv, stdin } = AGENTS[agent](prompt);
+  const { argv, stdin } = AGENTS[agent](prompt, model);
   const res = await run(['sbx', 'exec', name, ...argv], { stdin, timeoutMs: (timeout_seconds || 600) * 1000 });
   if (res.timedOut) throw new Error(`ask_agent timed out after ${timeout_seconds || 600}s; partial output:\n${res.out || res.err}`);
   if (res.code !== 0) throw new Error(`${agent} exited ${res.code}:\n${res.err || res.out}`);

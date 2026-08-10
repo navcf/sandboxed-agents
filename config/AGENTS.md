@@ -38,9 +38,10 @@ The `agents` MCP server exposes `ask_agent` — ask another sandboxed agent
 (claude, codex, or cursor) to do something, typically review your work. The
 peer runs headlessly in its own sandbox on the **same workspace**, so it sees
 your uncommitted changes; reference files, diffs, or commits by path in the
-prompt and say exactly what to return. Pass your workspace root as `workdir`.
-Reviews can take minutes — be patient. Never call `ask_agent` when the task
-you are working on was itself given to you via `ask_agent`.
+prompt and say exactly what to return. Pass your workspace root as `workdir`;
+optionally pass `model` (in the peer's own naming) if the user asks for a
+specific one. Reviews can take minutes — be patient. Never call `ask_agent`
+when the task you are working on was itself given to you via `ask_agent`.
 
 If the tool errors that no sandbox exists for the target agent, relay that to
 the user rather than retrying.
