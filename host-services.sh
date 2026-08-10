@@ -39,7 +39,10 @@ const PORT = Number(process.env.AGENT_BRIDGE_PORT || 4748);
 const AGENTS = {
   claude: (prompt, model) => ({ argv: ['claude', '--dangerously-skip-permissions', ...(model ? ['--model', model] : []), '-p'], stdin: prompt }),
   codex:  (prompt, model) => ({ argv: ['codex', 'exec', '--skip-git-repo-check', ...(model ? ['--model', model] : []), prompt] }),
-  cursor: (prompt, model) => ({ argv: ['cursor-agent', '-p', prompt, '--output-format', 'text', ...(model ? ['--model', model] : [])] }),
+  // --force: headless cursor-agent otherwise REJECTS every shell command it
+  // wants to run (the interactive TUI gets --yolo from sbx; -p mode doesn't),
+  // which surfaces as "no git/github access" during reviews.
+  cursor: (prompt, model) => ({ argv: ['cursor-agent', '-p', prompt, '--output-format', 'text', '--force', ...(model ? ['--model', model] : [])] }),
 };
 
 const TOOL = {
