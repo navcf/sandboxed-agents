@@ -87,6 +87,28 @@ sandboxes from these templates with `--no-share-skills`. (The codex image
 bakes to `~/.codex/skills`, which is not a mount target, but use the flag
 everywhere for consistency.)
 
+## Stopping and resuming
+
+Exiting an agent's TUI leaves its sandbox running in the background;
+`sbx stop <sandbox>` shuts it down cleanly. Stopped sandboxes retain all
+state and restart automatically on the next `sbx run`. A computer restart
+just stops them the same way — nothing is lost.
+
+After a reboot: start Docker Desktop, run `./host-services.sh`, then
+re-attach from the workspace dir. Each agent resumes its previous
+conversation with its own flag, passed after `--`:
+
+```sh
+sbx run claude -- --continue     # resume the last claude conversation
+sbx run codex -- resume --last   # resume the last codex session (or `resume` for a picker)
+sbx run cursor -- --resume       # pick a cursor chat (or `-- --continue` for the latest)
+```
+
+`sbx rm` is what actually discards state: the container filesystem — and
+with it codex/cursor session history — is gone. Claude's conversation
+history lives on sbx-managed persistent volumes (`~/.claude/projects` etc.)
+and survives even removal/recreation.
+
 ## Agent-to-agent review
 
 Agents cannot run each other's CLIs inside their own sandbox: sbx injects
