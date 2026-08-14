@@ -1,64 +1,54 @@
 #!/usr/bin/env bash
-# Build-time install of the sandbox dev stack. Sourced by every agent Dockerfile
-# so claude/codex/cursor sandboxes are identical.
+# Per-agent install of the sandbox dev stack. Run by every agent target in the
+# Dockerfile so claude/codex/cursor sandboxes are identical.
+#
+# The heavy, agent-agnostic pieces — official Node.js build, global TypeScript
+# toolchain, Playwright browsers, rtk — are downloaded ONCE in the Dockerfile's
+# shared `artifacts` stage (devstack-node.sh, install-browsers.sh) and
+# COPY --link'ed in before this script runs. This script only wires those into
+# place and installs what genuinely must be apt-installed per image:
+# PostgreSQL 18 + pg_cron, xvfb, and Chromium's shared libraries.
 #
 # Runs during `docker build` on the HOST, so it uses the host's network — the
 # sbx network policy does not apply here. Nothing in this file needs an
 # `sbx policy allow`.
 #
-# Installs:
-#   1. An official Node.js build. The base image's Ubuntu `nodejs` is compiled
-#      WITHOUT amaro, so `node foo.ts` fails outright.
-#   2. PostgreSQL 18 + pg_cron, with a server cert that actually names localhost.
-#   3. pnpm, a global TypeScript toolchain, Chromium's system libraries,
-#      ffmpeg, xvfb.
+# The Dockerfile runs this with apt + npm cache mounts so downloads are shared
+# across the three agent builds; that's why there is no
+# `rm -rf /var/lib/apt/lists` here — the lists live in the mount, not the layer.
 #
 # Runtime lifecycle lives in the `devstack` helper (installed to /usr/local/bin),
 # which is project-agnostic and configured per workspace via `.devstack.conf`.
-#
-# Version pins: align these with whichever project you work on most, so a
-# fallback invocation cannot silently differ from that project's CI.
 set -eux
 
-NODE_VERSION=v22.22.1
-PNPM_VERSION=10.33.4
 PG_MAJOR=18
-TYPESCRIPT_VERSION=5.9.3
-TSX_VERSION=4.20.6
 PLAYWRIGHT_VERSION=1.58.2
 
 export DEBIAN_FRONTEND=noninteractive
-apt-get update
-apt-get install -y --no-install-recommends ca-certificates curl openssl
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 1. Node.js — official build, for TypeScript type stripping
+# 1. Wire the shared artifacts into place
 # ─────────────────────────────────────────────────────────────────────────────
-# The base image's /usr/bin/node is Ubuntu's package, built without amaro:
-#     node -p "process.config.variables.node_use_amaro"   -> false
-#     node --experimental-strip-types x.ts                -> ERR_NO_TYPESCRIPT
-# Anything that invokes `node some.ts` directly needs this — build scripts,
-# codegen, and monorepo tools that resolve `.ts` entrypoints while computing a
-# project graph. The failure is confusing rather than obvious: task runners
-# report a graph error and every package logs "failed to load config from
-# …/vitest.config.ts", i.e. no tests run at all.
-# Installed to /opt/node, symlinked ahead of /usr/bin on PATH.
-ARCH="$(dpkg --print-architecture)"
-case "$ARCH" in
-  amd64) NODE_ARCH=x64 ;;
-  arm64) NODE_ARCH=arm64 ;;
-  *) echo "unsupported arch: $ARCH" >&2; exit 1 ;;
-esac
-curl -fsSL "https://nodejs.org/dist/${NODE_VERSION}/node-${NODE_VERSION}-linux-${NODE_ARCH}.tar.xz" -o /tmp/node.tar.xz
-mkdir -p /opt/node
-tar -xJf /tmp/node.tar.xz -C /opt/node --strip-components=1
-rm /tmp/node.tar.xz
+# Official Node ahead of Ubuntu's amaro-less /usr/bin/node (see devstack-node.sh
+# for why). The TS toolchain lives in its own prefix, /opt/node-tools: the base
+# images set NPM_CONFIG_PREFIX to a dir that already holds agent CLIs, so the
+# shared tools are kept apart from it rather than merged into it.
 for b in node npm npx; do ln -sf "/opt/node/bin/$b" "/usr/local/bin/$b"; done
-# Fail the build here, not three layers later, if the tarball ever ships without it.
+for b in pnpm tsc tsserver tsx; do ln -sf "/opt/node-tools/bin/$b" "/usr/local/bin/$b"; done
+# Fail here, not at first use, if the copied artifacts are broken.
 /usr/local/bin/node -p "process.versions.amaro || (() => { throw new Error('amaro missing') })()"
+/usr/local/bin/tsc --version
+/usr/local/bin/tsx --version
+
+# Playwright resolves browsers at ~/.cache/ms-playwright by default; point that
+# at the shared root-owned copy. install -d (rather than letting a Dockerfile
+# COPY create it) keeps ~/.cache agent-owned for everything else that caches
+# there; ln -s fails loudly if a base image ever ships its own browsers.
+install -d -o agent -g agent /home/agent/.cache
+ln -s /opt/ms-playwright /home/agent/.cache/ms-playwright
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 2. PostgreSQL 18 (+ pg_cron)
+# 2. PostgreSQL 18 (+ pg_cron), xvfb
 # ─────────────────────────────────────────────────────────────────────────────
 # Native rather than Docker-in-Docker: dev CLIs commonly probe for a local psql
 # or pg_isready and only fall back to `docker compose up` when nothing is
@@ -71,11 +61,21 @@ for b in node npm npx; do ln -sf "/opt/node/bin/$b" "/usr/local/bin/$b"; done
 #
 # If a project's CI pins a different major, be aware that pg_dump output is not
 # identical across majors — don't commit schema dumps generated in a sandbox.
+#
+# No apt ffmpeg: the package drags in ~400MB of codec/SDL/mesa/LLVM deps, and
+# Playwright video recording doesn't need it (it bundles its own ffmpeg in
+# /opt/ms-playwright). If a workload needs the ffmpeg CLI, bake a static build
+# in the artifacts stage instead of reintroducing the apt package.
+#
+# docker-clean would delete downloaded .debs; keep them for the cache mount.
+rm -f /etc/apt/apt.conf.d/docker-clean
+apt-get update
 apt-get install -y --no-install-recommends \
+    ca-certificates openssl \
     "postgresql-${PG_MAJOR}" \
     "postgresql-${PG_MAJOR}-cron" \
     "postgresql-client-${PG_MAJOR}" \
-    ffmpeg xvfb
+    xvfb
 
 # Debian/Ubuntu's postgresql.conf already ends with `include_dir = 'conf.d'`, so
 # a drop-in wins. `cron.database_name` is deliberately NOT set here: pg_cron is
@@ -110,25 +110,21 @@ install -m 644 /var/lib/postgresql/ssl/server.crt /usr/local/share/ca-certificat
 update-ca-certificates
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 3. pnpm + a global TypeScript toolchain + Chromium's shared libraries
+# 3. Chromium's shared libraries
 # ─────────────────────────────────────────────────────────────────────────────
-# Node's built-in support is type STRIPPING, not compilation: it erases
-# annotations and never type-checks, and plain `node x.ts` rejects non-erasable
-# syntax (enum, parameter properties) — those need
-# `node --experimental-transform-types`, which amaro does handle.
+# The browser binaries were baked in the artifacts stage; this installs only
+# their system library dependencies, which must be apt-installed in each image.
 #
-# So ship a real compiler too. Inside an installed workspace these are redundant:
-# `pnpm exec tsc` and `npx tsc` resolve node_modules/.bin first, so a project's
-# own pinned typescript/tsx (and tsgo, if it uses one) always wins. The global
-# copies are the fallback for everything else — scratch `.ts` files, a repo
-# before its install has run, and one-off scripts outside any workspace.
-/usr/local/bin/npm install -g \
-    "pnpm@${PNPM_VERSION}" \
-    "typescript@${TYPESCRIPT_VERSION}" \
-    "tsx@${TSX_VERSION}"
-for b in pnpm tsc tsserver tsx; do ln -sf "/opt/node/bin/$b" "/usr/local/bin/$b"; done
-/usr/local/bin/tsc --version
-/usr/local/bin/tsx --version
-/usr/local/bin/npx --yes "playwright@${PLAYWRIGHT_VERSION}" install-deps chromium
-
-rm -rf /var/lib/apt/lists/*
+# Playwright 1.58 has no package map for "ubuntu26.04", and install-deps
+# SILENTLY no-ops there — "Cannot install dependencies …!" with exit code 0,
+# leaving chromium unable to load libatk & co at runtime. Present 24.04 for the
+# duration (same dance as install-browsers.sh; the noble package list installs
+# fine on 26.04), then assert every library actually resolves.
+cp /etc/os-release /etc/os-release.real
+sed -i 's/^VERSION_ID="26.04"/VERSION_ID="24.04"/; s/resolute/noble/g' /etc/os-release
+/usr/local/bin/npx --yes "playwright@${PLAYWRIGHT_VERSION}" install-deps chromium-headless-shell
+mv -f /etc/os-release.real /etc/os-release
+if ldd /opt/ms-playwright/chromium_headless_shell-*/chrome-linux/headless_shell | grep "not found"; then
+  echo "headless_shell is missing shared libraries — install-deps skipped this distro?" >&2
+  exit 1
+fi

@@ -18,7 +18,11 @@ for agent in $AGENTS; do
   image=${IMAGE:-docker.io/navcf/sandbox-templates:$tag}
 
   ./stage.sh "$agent"
-  docker build -f "Dockerfile.$agent" -t "$image" .
+  # One Dockerfile, one target per agent. The shared `artifacts` stage builds
+  # on the first agent and is a cache hit for the rest.
+  docker build --target "$agent" \
+    --build-arg "BASE_IMAGE=docker/sandbox-templates:$tag" \
+    -t "$image" .
   docker push "$image"
 
   echo

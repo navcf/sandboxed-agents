@@ -4,7 +4,14 @@
 #
 # The software is installed at image build time (see devstack-install.sh); this
 # handles the runtime. It is deliberately project-agnostic — everything specific
-# to a workspace comes from an optional `.devstack.conf` at the workspace root:
+# to a workspace comes from an optional config file, resolved in order:
+#
+#     $DEVSTACK_CONF                 explicit path, wins when set
+#     <repo>/.local/.devstack.conf   preferred: .local/ is typically gitignored,
+#                                    so the config never dirties `git status`
+#     <repo>/.devstack.conf          legacy fallback at the workspace root
+#
+# Recognized settings:
 #
 #     DB_NAME=myapp                          # database to create/bootstrap
 #     INIT_SQL=db/init.sql                   # optional, relative to the workspace
@@ -21,7 +28,7 @@
 # (default: app); it just has nothing to migrate or seed.
 #
 # Usage:
-#   devstack up [--seed <preset>]   start pg, bootstrap db, install deps, migrate, seed
+#   devstack up [--seed <preset>]   start pg, bootstrap db, .env, install deps, migrate, seed
 #   devstack pg                     start the Postgres cluster only
 #   devstack reset [--seed <preset>]  re-bootstrap, migrate, reseed
 #   devstack status                 what is running
@@ -30,6 +37,10 @@
 # Deliberately does NOT start app servers: test runners usually manage their own
 # isolated schema and server lifecycle, and a dev server is an interactive choice.
 set -euo pipefail
+
+# Migrate/seed steps run app code; make sure they see an IANA TZ even when the
+# sandbox inherited a macOS abbreviation ("PDT7") — see fix-tz.sh.
+[ -f /usr/local/share/sbx/fix-tz.sh ] && . /usr/local/share/sbx/fix-tz.sh
 
 PG_MAJOR=18
 REPO="${DEVSTACK_REPO:-$(git -C "${PWD}" rev-parse --show-toplevel 2>/dev/null || echo "${PWD}")}"
@@ -43,8 +54,12 @@ TEST_HINT=
 TOLERATE_MIGRATE_FAIL_IF=
 SEED_PRESET=small
 
+CONF=""
+for c in "${DEVSTACK_CONF:-}" "${REPO}/.local/.devstack.conf" "${REPO}/.devstack.conf"; do
+  [ -n "$c" ] && [ -f "$c" ] && { CONF="$c"; break; }
+done
 # shellcheck source=/dev/null
-[ -f "${REPO}/.devstack.conf" ] && . "${REPO}/.devstack.conf"
+[ -n "$CONF" ] && . "$CONF"
 
 log()  { printf '\033[1;34m[devstack]\033[0m %s\n' "$1"; }
 ok()   { printf '\033[1;32m[devstack]\033[0m %s\n' "$1"; }
@@ -74,11 +89,14 @@ db_bootstrap() {
 
   # pg_cron is cluster-singleton and only installs into the database named by
   # cron.database_name, which the image leaves unset. Point it at this
-  # workspace's database and reload before anything tries CREATE EXTENSION.
+  # workspace's database before anything tries CREATE EXTENSION. The setting is
+  # postmaster-context (the background worker binds to it at startup), so a
+  # reload is silently ignored — this must be a restart.
   local conf="/etc/postgresql/${PG_MAJOR}/main/conf.d/20-devstack.conf"
   if ! sudo grep -qs "cron.database_name = '${DB_NAME}'" "$conf" 2>/dev/null; then
     printf "cron.database_name = '%s'\n" "${DB_NAME}" | sudo tee "$conf" >/dev/null
-    sudo pg_ctlcluster "${PG_MAJOR}" main reload
+    log "Restarting Postgres to apply cron.database_name='${DB_NAME}'…"
+    sudo pg_ctlcluster "${PG_MAJOR}" main restart
   fi
 
   # No `\gexec` here: psql meta-commands are not valid inside `-c`.
@@ -93,6 +111,16 @@ db_bootstrap() {
     psql_as -d postgres -q -v ON_ERROR_STOP=1 -f "${REPO}/${INIT_SQL}" >/dev/null
   fi
   ok "Database '${DB_NAME}' bootstrapped"
+}
+
+# Apps read config from .env, which is gitignored and therefore absent from a
+# fresh clone. Copy the committed example when there is no .env yet; an existing
+# .env (possibly hand-edited) is never touched.
+env_file() {
+  if [ -f "${REPO}/.env.example" ] && [ ! -f "${REPO}/.env" ]; then
+    cp "${REPO}/.env.example" "${REPO}/.env"
+    ok "Created .env from .env.example"
+  fi
 }
 
 deps() {
@@ -152,10 +180,10 @@ cmd="${1:-up}"; shift || true
 parse_flags "$@"
 
 case "$cmd" in
-  up)     pg_up; db_bootstrap; deps; migrate; seed
+  up)     pg_up; db_bootstrap; env_file; deps; migrate; seed
           ok "Dev stack ready.${TEST_HINT:+ Try: ${TEST_HINT}}" ;;
   pg)     pg_up ;;
-  reset)  pg_up; db_bootstrap; migrate; seed ;;
+  reset)  pg_up; db_bootstrap; env_file; migrate; seed ;;
   status)
           # Every probe is failure-tolerant: `status` reports, it never exits
           # non-zero just because part of the stack is down.
@@ -167,6 +195,10 @@ case "$cmd" in
           fi
           if [ -d "${REPO}/node_modules" ]; then echo "node_modules: present"
           else echo "node_modules: absent"; fi
+          if [ -f "${REPO}/.env" ]; then echo ".env: present"
+          elif [ -f "${REPO}/.env.example" ]; then echo ".env: absent (.env.example available — 'up' will copy it)"
+          else echo ".env: none"; fi
+          echo "TZ: ${TZ:-unset}"
           echo "node: $(node -v 2>/dev/null) (amaro $(node -p 'process.versions.amaro' 2>/dev/null || echo none))"
           echo "tsc:  $(tsc --version 2>/dev/null | tail -1) [global fallback; a workspace's own copy wins]"
           # A failed `playwright install` leaves the cache dir present but with
@@ -175,7 +207,7 @@ case "$cmd" in
           browsers="$(ls "${HOME}/.cache/ms-playwright" 2>/dev/null || true)"
           if [ -n "$browsers" ]; then echo "$browsers" | sed 's/^/browser: /'
           else echo "browsers: none"; fi
-          [ -f "${REPO}/.devstack.conf" ] && echo "config: .devstack.conf (db=${DB_NAME})" \
+          [ -n "$CONF" ] && echo "config: ${CONF} (db=${DB_NAME})" \
             || echo "config: none (db=${DB_NAME}, defaults)" ;;
   down)   sudo pg_ctlcluster "${PG_MAJOR}" main stop && ok "Postgres stopped" ;;
   *)      die "usage: devstack up|pg|reset|status|down [--seed <preset>]" ;;

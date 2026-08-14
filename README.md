@@ -12,9 +12,7 @@ sandbox, and the default sandbox names (`claude-<workdir>`, `codex-<workdir>`,
 
 | Path | Purpose |
 |---|---|
-| `Dockerfile.claude` | Template image on top of `docker/sandbox-templates:claude-code` |
-| `Dockerfile.codex` | Template image on top of `docker/sandbox-templates:codex` |
-| `Dockerfile.cursor` | Template image on top of `docker/sandbox-templates:cursor-agent` |
+| `Dockerfile` | All three template images on top of `docker/sandbox-templates:{claude-code,codex,cursor-agent}` — one target per agent (`claude`/`codex`/`cursor`), sharing an `artifacts` stage (rtk, Node, TS toolchain, Playwright browsers) that downloads once and `COPY --link`s into each image as identical blobs |
 | `skills.txt` | Declarative skill sources, one `npx skills add` source per line |
 | `stage.sh` | Installs sources into `build/<agent>/` via the [Vercel skills CLI](https://vercel.com/docs/agent-resources/skills) |
 | `skills-local/` | Curated local skills, referenced from the manifest |
@@ -23,9 +21,11 @@ sandbox, and the default sandbox names (`claude-<workdir>`, `codex-<workdir>`,
 | `config/gitnexus-mcp.cjs` | Merges the host MCP entries (gitnexus + agent-bridge) into `~/.claude.json` |
 | `config/gitnexus-mcp-codex.sh` | Grep-guard-appends the host MCP entries to `~/.codex/config.toml` |
 | `config/gitnexus-mcp-cursor.cjs` | Merges the host MCP entries into `~/.cursor/mcp.json` |
-| `config/devstack-install.sh` | Build-time dev stack: Postgres 18 + pg_cron, official Node, pnpm, TypeScript, Chromium deps, ffmpeg, xvfb |
-| `config/install-browsers.sh` | Build-time Playwright browser download (works around the missing arm64 build) |
-| `config/devstack` | Baked to `/usr/local/bin/devstack`; project-agnostic lifecycle (start pg, migrate, seed), configured per workspace via `.devstack.conf` |
+| `config/devstack-install.sh` | Per-agent dev stack install: Postgres 18 + pg_cron, xvfb, Chromium headless-shell deps, plus PATH wiring for the shared artifacts |
+| `config/devstack-node.sh` | Artifacts-stage download: official Node build + global pnpm/TypeScript/tsx (`/opt/node`, `/opt/node-tools`) |
+| `config/install-browsers.sh` | Artifacts-stage Playwright browser download to `/opt/ms-playwright` (works around the missing arm64 build) |
+| `config/devstack` | Baked to `/usr/local/bin/devstack`; project-agnostic lifecycle (start pg, `.env` bootstrap, migrate, seed), configured per workspace via `.local/.devstack.conf` |
+| `config/fix-tz.sh` | Sourced by the shims and `devstack`: replaces a non-IANA inherited `TZ` (macOS "PDT7") with UTC |
 | `claude-shim.sh` | Baked to `/home/agent/.local/bin/claude` (real launcher moved to `claude-real`); re-asserts config sbx clobbers, then `exec`s the real claude |
 | `codex-shim.sh` | Baked to `/home/agent/.local/bin/codex` (shadows the npm-global binary via PATH order); same re-assert-then-`exec` pattern |
 | `build.sh` | stage → `docker build` → `docker push`, per agent or all |
@@ -74,11 +74,14 @@ sbx secret set -g openai --oauth   # ChatGPT login for codex
 # creation). --no-share-skills is REQUIRED for baked skills to be visible —
 # see "How it works". Thereafter a bare `sbx run claude` / `sbx run codex` /
 # `sbx run cursor` re-attaches via the default sandbox name (<agent>-<workdir>).
-# `-e TZ=UTC` is not optional — see "Dev stack" below.
+# `-e TZ=UTC`: the claude/codex shims and devstack replace a non-IANA inherited
+# TZ with UTC on their own, but cursor's launcher is not shimmed — keep the
+# flag, especially for cursor. See "Dev stack" below.
 cd /path/to/workspace
-sbx run --no-share-skills -e TZ=UTC -t docker.io/navcf/sandbox-templates:claude-code claude
-sbx run --no-share-skills -e TZ=UTC -t docker.io/navcf/sandbox-templates:codex codex
-sbx run --no-share-skills -e TZ=UTC -t docker.io/navcf/sandbox-templates:cursor-agent cursor
+sbx create --clone --no-share-skills --name claude-<issue-id> -e TZ=UTC -t docker.io/navcf/sandbox-templates:claude-code claude . [dir-to-mount]
+sbx create --clone --no-share-skills --name claude-<issue-id> -e TZ=UTC -t docker.io/navcf/sandbox-templates:codex codex . [dir-to-mount]
+sbx create --clone --no-share-skills --name claude-<issue-id> -e TZ=UTC -t docker.io/navcf/sandbox-templates:cursor-agent cursor . [dir-to-mount]
+
 ```
 
 Override the image ref with `IMAGE=... ./build.sh claude` (single-agent builds
@@ -91,14 +94,22 @@ sandbox — a seeded database, unit/integration/E2E tests, and a real browser fo
 screenshots and video.
 
 ```sh
-devstack up        # start pg, bootstrap the db, install deps, migrate, seed
+devstack up        # start pg, bootstrap the db, .env from .env.example,
+                   # install deps, migrate, seed
 devstack status
 devstack reset     # re-bootstrap, migrate, reseed
 devstack down
 ```
 
+The baked global instructions (`config/CLAUDE.md` / `config/AGENTS.md`) tell
+agents to run `devstack up` before touching a fresh workspace, so first boot
+needs no manual bootstrapping.
+
 `devstack` itself is project-agnostic. Anything workspace-specific comes from an
-optional `.devstack.conf` at the workspace root:
+optional config file, resolved in order: `$DEVSTACK_CONF` (explicit path),
+`.local/.devstack.conf` (preferred — `.local/` is typically gitignored, so the
+config never dirties the workspace's `git status`), then a legacy
+`.devstack.conf` at the workspace root:
 
 ```sh
 DB_NAME=myapp                       # database to create; also gets pg_cron

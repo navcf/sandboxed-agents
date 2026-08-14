@@ -5,4 +5,6 @@
 # at sandbox creation, then hands off to the real codex.
 sh /usr/local/share/sbx/gitnexus-mcp-codex.sh || echo 'warn: gitnexus MCP registration failed' >&2
 sh /usr/local/share/sbx/codex-settings.sh || echo 'warn: custom settings append failed' >&2
+# Replace a non-IANA inherited TZ (macOS "PDT7") with UTC — see fix-tz.sh.
+. /usr/local/share/sbx/fix-tz.sh
 exec /usr/local/share/npm-global/bin/codex "$@"
