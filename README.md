@@ -23,6 +23,9 @@ sandbox, and the default sandbox names (`claude-<workdir>`, `codex-<workdir>`,
 | `config/gitnexus-mcp.cjs` | Merges the host MCP entries (gitnexus + agent-bridge) into `~/.claude.json` |
 | `config/gitnexus-mcp-codex.sh` | Grep-guard-appends the host MCP entries to `~/.codex/config.toml` |
 | `config/gitnexus-mcp-cursor.cjs` | Merges the host MCP entries into `~/.cursor/mcp.json` |
+| `config/devstack-install.sh` | Build-time dev stack: Postgres 18 + pg_cron, official Node, pnpm, TypeScript, Chromium deps, ffmpeg, xvfb |
+| `config/install-browsers.sh` | Build-time Playwright browser download (works around the missing arm64 build) |
+| `config/devstack` | Baked to `/usr/local/bin/devstack`; project-agnostic lifecycle (start pg, migrate, seed), configured per workspace via `.devstack.conf` |
 | `claude-shim.sh` | Baked to `/home/agent/.local/bin/claude` (real launcher moved to `claude-real`); re-asserts config sbx clobbers, then `exec`s the real claude |
 | `codex-shim.sh` | Baked to `/home/agent/.local/bin/codex` (shadows the npm-global binary via PATH order); same re-assert-then-`exec` pattern |
 | `build.sh` | stage → `docker build` → `docker push`, per agent or all |
@@ -41,6 +44,24 @@ sandbox, and the default sandbox names (`claude-<workdir>`, `codex-<workdir>`,
 sbx policy allow network "localhost:4747"
 sbx policy allow network "localhost:4748"
 
+# One-time, only if the workload inside the sandbox needs them at RUNTIME.
+# Nothing the images download at BUILD time needs a policy entry: ./build.sh
+# runs `docker build` on the host, outside the sbx proxy. That covers
+# nodejs.org, the npm registry, the Ubuntu archive and the Playwright binaries.
+#
+# Playwright — only needed if an agent re-runs `playwright install` inside a
+# sandbox (version drift from the baked browsers). All three are default-denied:
+sbx policy allow network "cdn.playwright.dev,playwright.download.prss.microsoft.com,storage.googleapis.com"
+# Stripe — needed by anything that mounts Stripe Elements in a browser, e.g. a
+# checkout page whose pay button gates on the PaymentElement reporting
+# completeness. Drop this line if you never drive a payment UI in a sandbox:
+sbx policy allow network "js.stripe.com,api.stripe.com,m.stripe.network,r.stripe.com,hooks.stripe.com"
+#
+# Already reachable by default, listed so nobody re-diagnoses them:
+#   registry.npmjs.org, archive.ubuntu.com, nodejs.org, dl.google.com,
+#   github.com, raw.githubusercontent.com
+# Diagnose any block with `sbx policy log`.
+
 # One-time per service: agent logins. Credentials are proxy-managed by sbx;
 # nothing is baked into the images. (anthropic is likely already set up.)
 sbx secret set -g openai --oauth   # ChatGPT login for codex
@@ -53,15 +74,114 @@ sbx secret set -g openai --oauth   # ChatGPT login for codex
 # creation). --no-share-skills is REQUIRED for baked skills to be visible —
 # see "How it works". Thereafter a bare `sbx run claude` / `sbx run codex` /
 # `sbx run cursor` re-attaches via the default sandbox name (<agent>-<workdir>).
+# `-e TZ=UTC` is not optional — see "Dev stack" below.
 cd /path/to/workspace
-sbx run --no-share-skills -t docker.io/navcf/sandbox-templates:claude-code claude
-sbx run --no-share-skills -t docker.io/navcf/sandbox-templates:codex codex
-sbx run --no-share-skills -t docker.io/navcf/sandbox-templates:cursor-agent cursor
+sbx run --no-share-skills -e TZ=UTC -t docker.io/navcf/sandbox-templates:claude-code claude
+sbx run --no-share-skills -e TZ=UTC -t docker.io/navcf/sandbox-templates:codex codex
+sbx run --no-share-skills -e TZ=UTC -t docker.io/navcf/sandbox-templates:cursor-agent cursor
 ```
 
 Override the image ref with `IMAGE=... ./build.sh claude` (single-agent builds
 only).
 
+## Dev stack
+
+The images bake enough to bring a typical Node + Postgres monorepo up inside a
+sandbox — a seeded database, unit/integration/E2E tests, and a real browser for
+screenshots and video.
+
+```sh
+devstack up        # start pg, bootstrap the db, install deps, migrate, seed
+devstack status
+devstack reset     # re-bootstrap, migrate, reseed
+devstack down
+```
+
+`devstack` itself is project-agnostic. Anything workspace-specific comes from an
+optional `.devstack.conf` at the workspace root:
+
+```sh
+DB_NAME=myapp                       # database to create; also gets pg_cron
+INIT_SQL=db/init.sql                # optional, relative to the workspace root
+MIGRATE_CMD='pnpm db migrate'       # optional
+SEED_CMD='pnpm seed'                # optional; $SEED_PRESET is exported to it
+TEST_HINT='pnpm test'               # optional, printed when `up` finishes
+TOLERATE_MIGRATE_FAIL_IF='Migrations succeeded'
+    # optional: treat a non-zero MIGRATE_CMD as success when its output contains
+    # this string — for CLIs whose migrate wrapper ends in a step that cannot run
+    # in a sandbox (codegen shelling out to `docker exec`, say) after the
+    # migrations themselves have already applied.
+```
+
+With no config file, `devstack up` still starts Postgres and creates the default
+database; it just has nothing to migrate or seed.
+
+Two behaviours worth knowing:
+
+- **No Docker-in-Docker.** Dev CLIs commonly probe for a local `psql` /
+  `pg_isready` and only fall back to `docker compose up` when nothing is
+  listening, so a native cluster satisfies them with far less machinery.
+- **`migrate` cleans up after itself.** If `MIGRATE_CMD` regenerates checked-in
+  files as a side effect, `devstack` reverts exactly the files that run dirtied,
+  and only those that were clean beforehand — work in progress is never touched.
+
+Four things the stock base image gets wrong, each fixed in
+`config/devstack-install.sh` (worth knowing because the symptoms point nowhere
+near the cause):
+
+1. **Node has no TypeScript support.** `/usr/bin/node` is Ubuntu's package,
+   built without amaro — `node --experimental-strip-types x.ts` gives
+   `ERR_NO_TYPESCRIPT`. Anything invoking `node some.ts` directly breaks in
+   confusing ways: task runners report a project-graph error and every package
+   logs `failed to load config from …/vitest.config.ts`, i.e. no tests run at
+   all. An official nodejs.org build goes to `/opt/node`, ahead of `/usr/bin` on
+   PATH. See "TypeScript" below for what that does and doesn't buy.
+2. **`TZ` arrives as an invalid zone.** sbx forwards the host's `TZ`, and macOS
+   sends abbreviations — `TZ="PDT7"`. `Intl.DateTimeFormat().resolvedOptions()
+   .timeZone` then returns `undefined` and every temporal-polyfill entry point
+   throws `TypeError: Invalid string: undefined`. `ENV TZ=UTC` in the Dockerfile
+   loses to a real inherited value, which is why `sbx run` needs `-e TZ=UTC`.
+3. **Postgres TLS.** `sslmode=require` in a connection string is verified end to
+   end by node-postgres, so Ubuntu's snakeoil cert (named for the container)
+   gives `ERR_TLS_CERT_ALTNAME_INVALID` and any untrusted self-signed cert gives
+   `DEPTH_ZERO_SELF_SIGNED_CERT`. The image issues a `CN=localhost` cert and
+   trusts it, keeping the connection verified rather than downgrading to
+   `sslmode=disable`.
+4. **Playwright has no `ubuntu26.04-arm64` build** and refuses before
+   downloading. Ubuntu's `chromium` is a snap stub and Chrome has no Linux/arm64
+   build, so `config/install-browsers.sh` presents 24.04 in `/etc/os-release`
+   for the duration of the install; the noble arm64 binaries run fine on 26.04's
+   newer glibc.
+
+### TypeScript
+
+Three layers, because Node's built-in support is narrower than it looks:
+
+| | Runs `.ts` | Non-erasable syntax (`enum`, parameter properties) | Type-checks |
+|---|---|---|---|
+| `node x.ts` | yes | **no** — `SyntaxError` | **no** |
+| `node --experimental-transform-types x.ts` | yes | yes | no |
+| `tsx x.ts` | yes | yes | no |
+| `tsc` | compiles | yes | **yes** |
+
+Node *strips* types: it erases annotations and executes, so
+`const n: number = "nope"` runs without complaint. Fine for the direct
+`node foo.ts` invocations tooling makes, but it is not a compiler.
+
+So `typescript` and `tsx` are installed globally too. These are a **fallback**:
+inside an installed workspace, `pnpm exec tsc` and `npx tsc` resolve
+`node_modules/.bin` first, so a project's own pinned compiler always wins. The
+globals exist for scratch `.ts` files, a repo before its install has run, and
+one-off scripts outside any workspace.
+
+Postgres is **18**, from Ubuntu 26.04's main archive — no third-party repo, and
+`postgresql-18-cron` is packaged for arm64 as well as amd64. Pinning 17 would
+mean adding PGDG *and* compiling pg_cron from source on Apple Silicon, since
+PGDG builds `postgresql-17-cron` for amd64 only.
+
+If a project's CI pins a different major, note that `pg_dump` output is not
+identical across majors — Postgres 18 emits named NOT NULL constraints where 17
+does not, for instance. Don't commit schema dumps generated in a sandbox.
 ## Skills
 
 Skills are managed with the [Vercel skills CLI](https://vercel.com/docs/agent-resources/skills).
@@ -205,13 +325,18 @@ calls (no review-of-review loops).
   `sbx secret set` — sign in from inside the cursor sandbox itself (the TUI
   prompts on first run); the proxy captures it globally. Alternatively store
   an API key with `sbx secret set -g cursor`.
-- **`ask_agent` times out after ~1 minute**: that is the *caller's* MCP
-  client timeout, not the bridge (which allows 600s). The templates raise it
-  — claude via `MCP_TOOL_TIMEOUT=900000` in `config/claude-settings.json`,
-  codex via `tool_timeout_sec = 900` on the `agents` server — so a sandbox
-  showing this predates the fix: recreate it. Cursor's MCP client timeout is
-  not configurable; if cursor-initiated reviews keep timing out, keep review
-  prompts narrow (a specific diff, not the whole repo).
+- **`ask_agent` times out**: everything is capped at **1 hour**, in three
+  independent places that must agree — the bridge default
+  (`timeoutMs` in `host-services.sh`, overridable per call via
+  `timeout_seconds`), claude's `MCP_TOOL_TIMEOUT=3600000` in
+  `config/claude-settings.json`, and codex's `tool_timeout_sec = 3600` on the
+  `agents` server in `config/gitnexus-mcp-codex.sh`. The *lowest* of these wins,
+  and the caller's client timeout is usually it: a review dying at ~15 minutes
+  despite `timeout_seconds: 3600` means the sandbox still has the old
+  `MCP_TOOL_TIMEOUT=900000` baked in — recreate it. Cursor's MCP client timeout
+  is not configurable; if cursor-initiated reviews keep timing out, split the
+  work into narrower prompts (one subsystem or one diff per call) rather than
+  raising anything.
 - **`ask_agent` fails or hangs**: check the bridge is running on the host
   (`./host-services.sh`) and `localhost:4748` is allowed (`sbx policy
   log`). "no <agent> sandbox found" means the target agent has no sandbox on

@@ -61,7 +61,7 @@ const TOOL = {
       workdir: { type: 'string', description: 'Absolute path of the shared workspace (your workspace root). Used to find the peer\'s sandbox.' },
       sandbox: { type: 'string', description: 'Optional explicit sandbox name; overrides workdir-based lookup.' },
       model: { type: 'string', description: 'Optional model for the peer, in that agent\'s own naming (e.g. cursor: "gpt-5.3-codex-high", "composer-2.5", see `cursor-agent models`; claude: "opus", "sonnet"; codex: "gpt-5-codex"). Omit for the agent\'s default.' },
-      timeout_seconds: { type: 'number', description: 'Max seconds to wait (default 600).' },
+      timeout_seconds: { type: 'number', description: 'Max seconds to wait (default 3600, i.e. 1h).' },
     },
     required: ['agent', 'prompt', 'workdir'],
   },
@@ -96,8 +96,8 @@ async function askAgent({ agent, prompt, workdir, sandbox, model, timeout_second
   if (!AGENTS[agent]) throw new Error(`unknown agent ${agent}; use claude, codex, or cursor`);
   const name = sandbox || (await resolveSandbox(agent, workdir));
   const { argv, stdin } = AGENTS[agent](prompt, model);
-  const res = await run(['sbx', 'exec', name, ...argv], { stdin, timeoutMs: (timeout_seconds || 600) * 1000 });
-  if (res.timedOut) throw new Error(`ask_agent timed out after ${timeout_seconds || 600}s; partial output:\n${res.out || res.err}`);
+  const res = await run(['sbx', 'exec', name, ...argv], { stdin, timeoutMs: (timeout_seconds || 3600) * 1000 });
+  if (res.timedOut) throw new Error(`ask_agent timed out after ${timeout_seconds || 3600}s; partial output:\n${res.out || res.err}`);
   if (res.code !== 0) throw new Error(`${agent} exited ${res.code}:\n${res.err || res.out}`);
   return res.out.trim() || '(no output)';
 }

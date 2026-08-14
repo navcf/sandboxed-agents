@@ -52,3 +52,12 @@ Write all plans in /Users/nav/Documents/Notes in Orgmode format. Do not use mark
 txt, or any other format. 
 
 
+## Github
+
+Do not push changes or post comments to Github instead ask for manual review 
+before pushing or posting. 
+
+## Comments
+
+Be succinct when writing comments for code and only if the code is not self-
+descriptive enough.

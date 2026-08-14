@@ -14,6 +14,24 @@ FROM docker/sandbox-templates:cursor-agent
 USER root
 COPY --from=rtk /usr/local/bin/rtk /usr/local/bin/rtk
 
+# ── Dev stack ────────────────────────────────────────────────────────────────
+# PostgreSQL 18 + pg_cron, an official Node build (the base image's is compiled
+# without amaro, so `node foo.ts` fails), pnpm, a global TypeScript toolchain,
+# Chromium's system libraries, ffmpeg and xvfb. See config/devstack-install.sh
+# for the reasoning per piece, and `devstack` for the per-workspace lifecycle.
+COPY config/devstack-install.sh /tmp/devstack-install.sh
+RUN sh /tmp/devstack-install.sh && rm /tmp/devstack-install.sh
+COPY --chmod=755 config/devstack /usr/local/bin/devstack
+
+# sbx forwards the host's TZ, and macOS sends abbreviations like "PDT7" — not a
+# valid IANA zone. Intl then resolves timeZone to undefined and every
+# temporal-polyfill call throws "Invalid string: undefined". ENV loses to a real inherited
+# TZ, so also pass `-e TZ=UTC` at sandbox creation.
+ENV TZ=UTC
+# Trusts the Postgres server cert issued by devstack-install.sh, so
+# DATABASE_SSL_MODE=require verifies instead of failing closed.
+ENV NODE_EXTRA_CA_CERTS=/usr/local/share/ca-certificates/devstack-postgres.crt
+
 # cursor-agent has no global instructions file (it reads AGENTS.md/CLAUDE.md
 # at the project root only), so nothing like ~/.claude/CLAUDE.md is baked.
 # Skills bake to cursor's global skills dir. Create sandboxes with
@@ -46,3 +64,10 @@ RUN mkdir -p /home/agent/.claude /home/agent/.cursor \
 
 # Register gitnexus at build time — sbx does not clobber this for cursor.
 RUN node /usr/local/share/sbx/gitnexus-mcp-cursor.cjs
+
+# Playwright browsers, baked so sandboxes need no runtime access to
+# cdn.playwright.dev. Runs as root and drops to `agent` internally.
+USER root
+COPY --chmod=755 config/install-browsers.sh /tmp/install-browsers.sh
+RUN /tmp/install-browsers.sh && rm /tmp/install-browsers.sh
+USER agent

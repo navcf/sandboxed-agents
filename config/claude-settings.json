@@ -9,6 +9,6 @@
     "deny": []
   },
   "env": {
-    "MCP_TOOL_TIMEOUT": "900000"
+    "MCP_TOOL_TIMEOUT": "3600000"
   }
 }

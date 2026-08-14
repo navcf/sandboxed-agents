@@ -22,7 +22,7 @@ if ! grep -q '^\[mcp_servers\.agents\]' "$cfg"; then
 type = "http"
 url = "http://host.docker.internal:4748/mcp"
 # Peer reviews via ask_agent take minutes; codex's default MCP tool timeout
-# is 60s, which would abort them mid-flight.
-tool_timeout_sec = 900
+# is 60s, which would abort them mid-flight. 1h matches the claude/bridge caps.
+tool_timeout_sec = 3600
 EOF
 fi

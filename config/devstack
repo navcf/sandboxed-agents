@@ -1,0 +1,182 @@
+#!/usr/bin/env bash
+# devstack — per-sandbox dev-stack lifecycle: bring up Postgres and get a
+# workspace to a migrated, seeded state.
+#
+# The software is installed at image build time (see devstack-install.sh); this
+# handles the runtime. It is deliberately project-agnostic — everything specific
+# to a workspace comes from an optional `.devstack.conf` at the workspace root:
+#
+#     DB_NAME=myapp                          # database to create/bootstrap
+#     INIT_SQL=db/init.sql                   # optional, relative to the workspace
+#     MIGRATE_CMD='pnpm db migrate'          # optional
+#     SEED_CMD='pnpm seed --small'           # optional; $SEED_PRESET is exported
+#     TEST_HINT='pnpm test'                  # optional, printed on success
+#     TOLERATE_MIGRATE_FAIL_IF='Migrations succeeded'
+#         # optional: treat a non-zero MIGRATE_CMD as success when its output
+#         # contains this string. For CLIs whose migrate wrapper ends in a step
+#         # that cannot run in a sandbox (e.g. codegen shelling out to `docker
+#         # exec`) after the migrations themselves have already applied.
+#
+# With no config file, `devstack up` still starts Postgres and creates $DB_NAME
+# (default: app); it just has nothing to migrate or seed.
+#
+# Usage:
+#   devstack up [--seed <preset>]   start pg, bootstrap db, install deps, migrate, seed
+#   devstack pg                     start the Postgres cluster only
+#   devstack reset [--seed <preset>]  re-bootstrap, migrate, reseed
+#   devstack status                 what is running
+#   devstack down                   stop the Postgres cluster
+#
+# Deliberately does NOT start app servers: test runners usually manage their own
+# isolated schema and server lifecycle, and a dev server is an interactive choice.
+set -euo pipefail
+
+PG_MAJOR=18
+REPO="${DEVSTACK_REPO:-$(git -C "${PWD}" rev-parse --show-toplevel 2>/dev/null || echo "${PWD}")}"
+
+# Defaults, overridable by .devstack.conf
+DB_NAME=app
+INIT_SQL=
+MIGRATE_CMD=
+SEED_CMD=
+TEST_HINT=
+TOLERATE_MIGRATE_FAIL_IF=
+SEED_PRESET=small
+
+# shellcheck source=/dev/null
+[ -f "${REPO}/.devstack.conf" ] && . "${REPO}/.devstack.conf"
+
+log()  { printf '\033[1;34m[devstack]\033[0m %s\n' "$1"; }
+ok()   { printf '\033[1;32m[devstack]\033[0m %s\n' "$1"; }
+die()  { printf '\033[1;31m[devstack]\033[0m %s\n' "$1" >&2; exit 1; }
+
+psql_as() { PGPASSWORD=postgres psql -h localhost -U postgres "$@"; }
+
+pg_up() {
+  if pg_isready -h localhost -p 5432 -q 2>/dev/null; then
+    ok "Postgres already accepting connections on :5432"
+    return 0
+  fi
+  log "Starting PostgreSQL ${PG_MAJOR}…"
+  sudo pg_ctlcluster "${PG_MAJOR}" main start
+  for _ in $(seq 1 30); do
+    pg_isready -h localhost -p 5432 -q 2>/dev/null && { ok "Postgres up"; return 0; }
+    sleep 1
+  done
+  sudo tail -30 "/var/log/postgresql/postgresql-${PG_MAJOR}-main.log" >&2 || true
+  die "Postgres failed to start"
+}
+
+# Idempotent: the password, the CREATE DATABASE and a well-written init script
+# all no-op on re-run.
+db_bootstrap() {
+  sudo -u postgres psql -qtAc "ALTER USER postgres PASSWORD 'postgres';" >/dev/null
+
+  # pg_cron is cluster-singleton and only installs into the database named by
+  # cron.database_name, which the image leaves unset. Point it at this
+  # workspace's database and reload before anything tries CREATE EXTENSION.
+  local conf="/etc/postgresql/${PG_MAJOR}/main/conf.d/20-devstack.conf"
+  if ! sudo grep -qs "cron.database_name = '${DB_NAME}'" "$conf" 2>/dev/null; then
+    printf "cron.database_name = '%s'\n" "${DB_NAME}" | sudo tee "$conf" >/dev/null
+    sudo pg_ctlcluster "${PG_MAJOR}" main reload
+  fi
+
+  # No `\gexec` here: psql meta-commands are not valid inside `-c`.
+  if ! psql_as -d postgres -tAc \
+       "SELECT 1 FROM pg_database WHERE datname = '${DB_NAME}'" | grep -q 1; then
+    psql_as -d postgres -qc "CREATE DATABASE \"${DB_NAME}\"" >/dev/null
+  fi
+
+  if [ -n "${INIT_SQL}" ]; then
+    [ -f "${REPO}/${INIT_SQL}" ] || die "INIT_SQL not found: ${REPO}/${INIT_SQL}"
+    log "Applying ${INIT_SQL}…"
+    psql_as -d postgres -q -v ON_ERROR_STOP=1 -f "${REPO}/${INIT_SQL}" >/dev/null
+  fi
+  ok "Database '${DB_NAME}' bootstrapped"
+}
+
+deps() {
+  if [ -f "${REPO}/pnpm-lock.yaml" ] && [ ! -d "${REPO}/node_modules" ]; then
+    log "Installing workspace dependencies…"
+    (cd "${REPO}" && pnpm install --frozen-lockfile)
+  fi
+}
+
+# A migrate wrapper can leave generated files behind. Restore exactly what this
+# run dirtied, and only files that were clean beforehand, so work in progress is
+# never touched.
+tracked_dirty() { (cd "${REPO}" && git diff --name-only 2>/dev/null || true); }
+
+migrate() {
+  [ -n "${MIGRATE_CMD}" ] || return 0
+  log "Migrating…"
+  local before after strays out rc=0
+  before="$(tracked_dirty)"
+
+  out="$(cd "${REPO}" && eval "${MIGRATE_CMD}" 2>&1)" || rc=$?
+
+  after="$(tracked_dirty)"
+  strays="$(comm -13 <(printf '%s\n' "$before" | sort -u) <(printf '%s\n' "$after" | sort -u))"
+  if [ -n "$strays" ]; then
+    (cd "${REPO}" && printf '%s\n' "$strays" | xargs -r git checkout --) 2>/dev/null || true
+    log "Reverted $(printf '%s\n' "$strays" | grep -c .) generated file(s) touched by the migrate step"
+  fi
+
+  [ "$rc" -eq 0 ] && return 0
+  if [ -n "${TOLERATE_MIGRATE_FAIL_IF}" ] && printf '%s' "$out" | grep -q "${TOLERATE_MIGRATE_FAIL_IF}"; then
+    log "Migrations OK (ignoring a later non-fatal step in MIGRATE_CMD)"
+    return 0
+  fi
+  printf '%s\n' "$out" >&2
+  die "migrate failed"
+}
+
+seed() {
+  [ -n "${SEED_CMD}" ] || return 0
+  [ "${SEED_PRESET}" = none ] && { log "Skipping seed"; return 0; }
+  log "Seeding (${SEED_PRESET})…"
+  (cd "${REPO}" && SEED_PRESET="${SEED_PRESET}" eval "${SEED_CMD}")
+  ok "Seeded"
+}
+
+parse_flags() {
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --seed) SEED_PRESET="${2:?--seed needs a value}"; shift 2 ;;
+      *) shift ;;
+    esac
+  done
+}
+
+cmd="${1:-up}"; shift || true
+parse_flags "$@"
+
+case "$cmd" in
+  up)     pg_up; db_bootstrap; deps; migrate; seed
+          ok "Dev stack ready.${TEST_HINT:+ Try: ${TEST_HINT}}" ;;
+  pg)     pg_up ;;
+  reset)  pg_up; db_bootstrap; migrate; seed ;;
+  status)
+          # Every probe is failure-tolerant: `status` reports, it never exits
+          # non-zero just because part of the stack is down.
+          if pg_isready -h localhost -p 5432; then
+            psql_as -d "${DB_NAME}" -tAc \
+              "select 'schemas: '||count(*) from information_schema.schemata
+                 where schema_name not like 'pg\_%' and schema_name <> 'information_schema'" \
+              2>/dev/null || echo "schemas: (database '${DB_NAME}' not bootstrapped)"
+          fi
+          if [ -d "${REPO}/node_modules" ]; then echo "node_modules: present"
+          else echo "node_modules: absent"; fi
+          echo "node: $(node -v 2>/dev/null) (amaro $(node -p 'process.versions.amaro' 2>/dev/null || echo none))"
+          echo "tsc:  $(tsc --version 2>/dev/null | tail -1) [global fallback; a workspace's own copy wins]"
+          # A failed `playwright install` leaves the cache dir present but with
+          # only its bookkeeping dotfiles (`.links`), so test for real entries:
+          # plain `ls` (no -A) skips dotfiles and yields nothing in that case.
+          browsers="$(ls "${HOME}/.cache/ms-playwright" 2>/dev/null || true)"
+          if [ -n "$browsers" ]; then echo "$browsers" | sed 's/^/browser: /'
+          else echo "browsers: none"; fi
+          [ -f "${REPO}/.devstack.conf" ] && echo "config: .devstack.conf (db=${DB_NAME})" \
+            || echo "config: none (db=${DB_NAME}, defaults)" ;;
+  down)   sudo pg_ctlcluster "${PG_MAJOR}" main stop && ok "Postgres stopped" ;;
+  *)      die "usage: devstack up|pg|reset|status|down [--seed <preset>]" ;;
+esac
