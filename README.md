@@ -26,8 +26,8 @@ sandbox, and the default sandbox names (`claude-<workdir>`, `codex-<workdir>`,
 | `config/install-browsers.sh` | Artifacts-stage Playwright browser download to `/opt/ms-playwright` (works around the missing arm64 build) |
 | `config/devstack` | Baked to `/usr/local/bin/devstack`; project-agnostic lifecycle (start pg, `.env` bootstrap, migrate, seed), configured per workspace via `.local/.devstack.conf` |
 | `config/fix-tz.sh` | Sourced by the shims and `devstack`: replaces a non-IANA inherited `TZ` (macOS "PDT7") with UTC |
-| `claude-shim.sh` | Baked to `/home/agent/.local/bin/claude` (real launcher moved to `claude-real`); re-asserts config sbx clobbers, then `exec`s the real claude |
-| `codex-shim.sh` | Baked to `/home/agent/.local/bin/codex` (shadows the npm-global binary via PATH order); same re-assert-then-`exec` pattern |
+| `claude-shim.sh` | Baked to `/home/agent/.local/bin/claude` (real launcher moved to `claude-real`); re-asserts config sbx clobbers, fixes TZ, runs `devstack up`, then `exec`s the real claude |
+| `codex-shim.sh` | Baked to `/home/agent/.local/bin/codex` (shadows the npm-global binary via PATH order); same re-assert/TZ/devstack-then-`exec` pattern |
 | `build.sh` | stage → `docker build` → `docker push`, per agent or all |
 | `host-services.sh` | Self-contained host-side MCP servers: gitnexus on :4747 + agent-bridge on :4748 (lets agents ask each other for reviews); stops both together |
 | `build/<agent>/` | Generated build contexts (never edit; recreated by `stage.sh`) |
@@ -95,15 +95,24 @@ screenshots and video.
 
 ```sh
 devstack up        # start pg, bootstrap the db, .env from .env.example,
-                   # install deps, migrate, seed
+                   # install deps; migrate+seed only if the db is still empty
 devstack status
-devstack reset     # re-bootstrap, migrate, reseed
+devstack reset     # explicit rebuild: re-bootstrap, migrate, reseed
 devstack down
 ```
 
-The baked global instructions (`config/CLAUDE.md` / `config/AGENTS.md`) tell
-agents to run `devstack up` before touching a fresh workspace, so first boot
-needs no manual bootstrapping.
+With no config file, `up` infers the database name from the workspace's
+`.env`/`.env.example` (`DATABASE_NAME`, `POSTGRES_DB`, `PGDATABASE`, or the
+`DATABASE_URL` path) and warns that nothing was migrated or seeded. `up` never
+touches a database that already has tables — `MIGRATE_CMD` is commonly a full
+rebuild (`db reset`), so only the explicit `devstack reset` re-runs it.
+
+The claude/codex shims run `devstack up` automatically at every launch (a ~1s
+no-op once bootstrapped; it also restarts Postgres after a sandbox
+stop/resume), so first boot needs no manual bootstrapping and the baked global
+instructions (`config/CLAUDE.md` / `config/AGENTS.md`) tell agents to verify
+rather than bootstrap. cursor has no shim — run `devstack up` in the sandbox
+yourself, or let the project's `AGENTS.md` instruct the agent to.
 
 `devstack` itself is project-agnostic. Anything workspace-specific comes from an
 optional config file, resolved in order: `$DEVSTACK_CONF` (explicit path),
@@ -123,9 +132,6 @@ TOLERATE_MIGRATE_FAIL_IF='Migrations succeeded'
     # in a sandbox (codegen shelling out to `docker exec`, say) after the
     # migrations themselves have already applied.
 ```
-
-With no config file, `devstack up` still starts Postgres and creates the default
-database; it just has nothing to migrate or seed.
 
 Two behaviours worth knowing:
 
