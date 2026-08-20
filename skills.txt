@@ -9,5 +9,6 @@ anthropics/skills -s '*'
 mattpocock/skills -s '*'
 multica-ai/andrej-karpathy-skills -s '*'
 davebcn87/pi-autoresearch -s '*'
+humanlayer/skills -s show-me
 ../.ai/skills -s '*'
 ./skills-local
