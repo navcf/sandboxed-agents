@@ -117,8 +117,16 @@ peer runs headlessly in its own sandbox on the **same workspace**, so it sees
 your uncommitted changes; reference files, diffs, or commits by path in the
 prompt and say exactly what to return. Pass your workspace root as `workdir`;
 optionally pass `model` (in the peer's own naming) if the user asks for a
-specific one. Reviews can take minutes — be patient. Never call `ask_agent`
-when the task you are working on was itself given to you via `ask_agent`.
+specific one.
+
+`ask_agent` waits up to ~50s; a quick answer comes back directly, otherwise
+you get a **job id** while the peer keeps working (long reviews can take
+30-60 min). Poll `get_agent_response({job_id})` — each call waits up to ~50s
+and either returns the final answer or a status line with the peer's output
+so far. Keep polling until the answer arrives; NEVER re-issue `ask_agent`
+for the same task, and never treat a "still running" status as the answer.
+Never call `ask_agent` when the task you are working on was itself given to
+you via `ask_agent`.
 
 If the tool errors that no sandbox exists for the target agent, relay that to
 the user rather than retrying.

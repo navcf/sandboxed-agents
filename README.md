@@ -252,19 +252,32 @@ Agents cannot run each other's CLIs inside their own sandbox: sbx injects
 credentials and allows API domains per agent manifest, so e.g. `codex` inside
 the claude sandbox has no OpenAI key and no route to `api.openai.com`.
 Instead, `host-services.sh` serves an MCP server (`agents`, registered in
-all three templates) with one tool:
+all three templates) with two tools:
 
-- `ask_agent({agent, prompt, workdir})` — runs the target agent **headlessly
+- `ask_agent({agent, prompt, workdir})` — starts the target agent **headlessly
   inside its own sandbox** via `sbx exec` (`claude -p` / `codex exec` /
-  `cursor-agent -p`), against the same shared workspace, and returns its
-  final answer. `workdir` is the absolute workspace path, used to find the
-  peer's sandbox (falls back to the default `<agent>-<workdir>` name; pass
-  `sandbox` to override).
+  `cursor-agent -p`), against the same shared workspace. `workdir` is the
+  absolute workspace path, used to find the peer's sandbox (falls back to the
+  default `<agent>-<workdir>` name; pass `sandbox` to override). The call
+  blocks up to `wait_seconds` (default 50): a fast peer's answer is returned
+  directly; a slow one gets you a **job id** while it keeps running on the
+  host (up to `timeout_seconds`, default/max 1h).
+- `get_agent_response({job_id})` — long-poll a running job: blocks up to
+  `wait_seconds` (default 50) and returns either the final answer or a status
+  line (elapsed time + tail of the peer's output so far). Finished answers
+  stay fetchable for 6h, surviving any client-side timeout or dropped
+  connection in between.
+
+The short per-call window is deliberate: it sits under every MCP client's
+tool-timeout floor (codex defaults to 60s, cursor's client timeout is not
+configurable), so a 45-minute adversarial review is a series of cheap 50s
+polls instead of one fragile hour-long HTTP request.
 
 So with claude and codex sandboxes on the same workspace, you can tell
 claude: *"implement X, then ask codex to review your diff"* — claude calls
 `ask_agent(agent: "codex", prompt: "Review the uncommitted changes…",
-workdir: "<workspace>")` and gets the review back as text. The peer sees
+workdir: "<workspace>")` and polls `get_agent_response` until the review
+comes back as text. The peer sees
 uncommitted changes (same bind-mount). Requirements: the bridge running on
 the host, the `localhost:4748` policy allow, and a signed-in sandbox for the
 target agent. The instruction files tell agents not to chain `ask_agent`
@@ -342,23 +355,27 @@ calls (no review-of-review loops).
   `sbx secret set` — sign in from inside the cursor sandbox itself (the TUI
   prompts on first run); the proxy captures it globally. Alternatively store
   an API key with `sbx secret set -g cursor`.
-- **`ask_agent` times out**: everything is capped at **1 hour**, in three
-  independent places that must agree — the bridge default
-  (`timeoutMs` in `host-services.sh`, overridable per call via
-  `timeout_seconds`), claude's `MCP_TOOL_TIMEOUT=3600000` in
-  `config/claude-settings.json`, and codex's `tool_timeout_sec = 3600` on the
-  `agents` server in `config/gitnexus-mcp-codex.sh`. The *lowest* of these wins,
-  and the caller's client timeout is usually it: a review dying at ~15 minutes
-  despite `timeout_seconds: 3600` means the sandbox still has the old
-  `MCP_TOOL_TIMEOUT=900000` baked in — recreate it. Cursor's MCP client timeout
-  is not configurable; if cursor-initiated reviews keep timing out, split the
-  work into narrower prompts (one subsystem or one diff per call) rather than
-  raising anything.
+- **`ask_agent` times out**: individual MCP calls should never come near a
+  client timeout anymore — `ask_agent`/`get_agent_response` block only
+  `wait_seconds` (default 50s) per call while the peer runs asynchronously on
+  the host (job capped at 1h via `timeout_seconds`). If a caller still reports
+  a tool timeout, either the bridge on the host is an old pre-job version
+  (restart `./host-services.sh`), or the caller passed a large explicit
+  `wait_seconds` that exceeds its own client timeout — claude's is
+  `MCP_TOOL_TIMEOUT=3600000` in `config/claude-settings.json`, codex's is
+  `tool_timeout_sec = 3600` in `config/gitnexus-mcp-codex.sh` (60s default if
+  the config block predates that setting — the grep-guarded append never
+  upgrades an existing `[mcp_servers.agents]` block), and cursor's is not
+  configurable at all. Stick to the default `wait_seconds` and poll. A job
+  erroring with "peer run killed after 3600s" genuinely exceeded the 1h cap —
+  split the review into narrower prompts (one subsystem or one diff per call).
 - **`ask_agent` fails or hangs**: check the bridge is running on the host
   (`./host-services.sh`) and `localhost:4748` is allowed (`sbx policy
   log`). "no <agent> sandbox found" means the target agent has no sandbox on
-  that workspace — create one. A hang usually means the target sandbox is not
-  signed in (the headless CLI is waiting on a login prompt); run the agent
-  interactively once to authenticate.
+  that workspace — create one. A job that stays "still running" with no
+  output tail usually means the target sandbox is not signed in (the headless
+  CLI is waiting on a login prompt); run the agent interactively once to
+  authenticate. "unknown job" from `get_agent_response` means the bridge
+  restarted since the job started — re-issue the `ask_agent` call.
 - **Stale gitnexus index**: re-run the analyze on the host — never inside the
   sandbox.
