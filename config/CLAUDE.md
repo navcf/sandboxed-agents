@@ -142,6 +142,11 @@ txt, or any other format.
 Do not push changes or post comments to Github instead ask for manual review 
 before pushing or posting. 
 
+SSH access to GitHub works only if the host mounted a dedicated key into this
+sandbox at creation. If `git@github.com:` operations fail with
+`Permission denied (publickey)` or hang, report it to the user — do not
+generate keys, edit `~/.ssh`, or rewrite remotes to work around it.
+
 ## Comments
 
 Be succinct when writing comments for code and only if the code is not self-

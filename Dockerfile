@@ -65,6 +65,12 @@ COPY --chmod=755 config/devstack /usr/local/bin/devstack
 # Sourced by the agent shims and devstack to replace a non-IANA inherited TZ
 # (macOS "PDT7") with UTC before anything date-y runs.
 COPY config/fix-tz.sh /usr/local/share/sbx/fix-tz.sh
+# GitHub-over-SSH provisioning, run by the shims at every launch: copies a
+# host-MOUNTED deploy key into ~/.ssh (a key must never be baked into a layer
+# — these images are pushed to a registry) and writes ssh config/known_hosts.
+# No-op when no key is mounted. See README "GitHub over SSH".
+COPY config/setup-ssh.sh /usr/local/share/sbx/setup-ssh.sh
+COPY config/github-known-hosts /usr/local/share/sbx/github-known-hosts
 
 # sbx forwards the host's TZ, and macOS sends abbreviations like "PDT7" — not a
 # valid IANA zone. Intl then resolves timeZone to undefined and every

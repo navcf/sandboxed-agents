@@ -5,6 +5,9 @@
 # sandbox creation, then hands off to the real claude.
 node /usr/local/share/sbx/gitnexus-mcp.cjs || echo 'warn: gitnexus MCP registration failed' >&2
 node /usr/local/share/sbx/claude-settings-merge.cjs || echo 'warn: settings merge failed' >&2
+# Provision GitHub SSH from a host-mounted key, if one was mounted at creation
+# (idempotent no-op otherwise) — see README "GitHub over SSH".
+sh /usr/local/share/sbx/setup-ssh.sh || echo 'warn: github ssh setup failed' >&2
 # Replace a non-IANA inherited TZ (macOS "PDT7") with UTC — see fix-tz.sh.
 . /usr/local/share/sbx/fix-tz.sh
 # Bring the workspace's dev stack up before the agent starts. devstack up is

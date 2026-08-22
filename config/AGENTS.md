@@ -135,3 +135,10 @@ the user rather than retrying.
 
 Write all plans in /Users/nav/Documents/Notes in Orgmode format. Do not use markdown, 
 txt, or any other format. 
+
+## Github
+
+SSH access to GitHub works only if the host mounted a dedicated key into this
+sandbox at creation. If `git@github.com:` operations fail with
+`Permission denied (publickey)` or hang, report it to the user — do not
+generate keys, edit `~/.ssh`, or rewrite remotes to work around it.

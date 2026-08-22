@@ -26,6 +26,8 @@ sandbox, and the default sandbox names (`claude-<workdir>`, `codex-<workdir>`,
 | `config/install-browsers.sh` | Artifacts-stage Playwright browser download to `/opt/ms-playwright` (works around the missing arm64 build) |
 | `config/devstack` | Baked to `/usr/local/bin/devstack`; project-agnostic lifecycle (start pg, `.env` bootstrap, migrate, seed), configured per workspace via `.local/.devstack.conf` |
 | `config/fix-tz.sh` | Sourced by the shims and `devstack`: replaces a non-IANA inherited `TZ` (macOS "PDT7") with UTC |
+| `config/setup-ssh.sh` | Run by the shims at every launch: copies a host-mounted GitHub deploy key into `~/.ssh` (0600, agent-owned) and writes `~/.ssh/config` + `known_hosts`; silent no-op when no key is mounted — see "GitHub over SSH" |
+| `config/github-known-hosts` | GitHub's published SSH host keys (from `api.github.com/meta`), baked so the first git-over-SSH operation never hangs on a host-key prompt |
 | `claude-shim.sh` | Baked to `/home/agent/.local/bin/claude` (real launcher moved to `claude-real`); re-asserts config sbx clobbers, fixes TZ, runs `devstack up`, then `exec`s the real claude |
 | `codex-shim.sh` | Baked to `/home/agent/.local/bin/codex` (shadows the npm-global binary via PATH order); same re-assert/TZ/devstack-then-`exec` pattern |
 | `build.sh` | stage → `docker build` → `docker push`, per agent or all |
@@ -86,6 +88,65 @@ sbx create --clone --no-share-skills --name claude-<issue-id> -e TZ=UTC -t docke
 
 Override the image ref with `IMAGE=... ./build.sh claude` (single-agent builds
 only).
+
+## GitHub over SSH
+
+Optional: sandboxes reach GitHub over HTTPS out of the box; SSH remotes
+(`git@github.com:owner/repo.git`) need a key. The key is **never baked into an
+image** — images are pushed to a registry, and a secret in a layer is
+published. Instead the host mounts a dedicated key directory at sandbox
+creation and `config/setup-ssh.sh` installs it at launch.
+
+One-time host setup — a **dedicated keypair used only by sandboxes**, never
+your personal key:
+
+```sh
+mkdir -p ~/.ssh/sandbox
+ssh-keygen -t ed25519 -f ~/.ssh/sandbox/id_ed25519 -C "sandbox"
+```
+
+Then grant `~/.ssh/sandbox/id_ed25519.pub` access on GitHub — narrowest grant
+first:
+
+- **Deploy key** (repo → Settings → Deploy keys): scoped to a single
+  repository and read-only by default; tick "Allow write access" only if
+  sandboxes should push. The right choice when agents work on a known repo.
+- **Machine-user key**: a separate GitHub account holding only this key,
+  invited to just the repos it needs — multi-repo access without exposing your
+  main account. Read-only vs read-write is controlled by the role you give it.
+- Adding the key to your own account also works, but grants sandboxes
+  everything your account can reach — avoid it.
+
+One-time policy: the sandbox proxy default-denies non-HTTPS egress, and
+`github.com` is only pre-allowed for 443:
+
+```sh
+sbx policy allow network "github.com:22"
+```
+
+Per sandbox, mount the key directory as an extra **read-only** workspace at
+creation (extra workspaces mount at the same absolute path as on the host):
+
+```sh
+sbx create --clone --no-share-skills -e TZ=UTC -t <image> claude . ~/.ssh/sandbox:ro
+```
+
+At every launch the claude/codex shims run
+`/usr/local/share/sbx/setup-ssh.sh`: bind mounts preserve host ownership and
+ssh insists on a 600 key owned by the current user, so the key can't be used
+in place — the script copies it to `~/.ssh/github_sandbox` (0600, owned by
+`agent`), appends a grep-guarded `Host github.com` block to `~/.ssh/config`
+(`IdentitiesOnly yes`, so the dedicated key is the only one offered), and
+installs GitHub's published host keys into `~/.ssh/known_hosts` (baked from
+`api.github.com/meta` — no `ssh-keyscan` trust-on-first-use, no host-key
+prompt hanging the first git operation). cursor has no shim — run
+`sh /usr/local/share/sbx/setup-ssh.sh` once inside the sandbox; the result
+persists in the container filesystem. A non-standard key location can be
+pointed at with `-e SANDBOX_GITHUB_KEY=/abs/path/to/key` at creation.
+
+Everything degrades gracefully: with no key mounted the script exits silently
+and the sandbox boots exactly as before, HTTPS-only. Verify with
+`ssh -T git@github.com` (expect the "successfully authenticated" banner).
 
 ## Dev stack
 
@@ -377,5 +438,16 @@ calls (no review-of-review loops).
   CLI is waiting on a login prompt); run the agent interactively once to
   authenticate. "unknown job" from `get_agent_response` means the bridge
   restarted since the job started — re-issue the `ask_agent` call.
+- **git-over-SSH hangs or times out**: check `sbx policy log` for a blocked
+  `github.com:22` — the one-time `sbx policy allow network "github.com:22"` is
+  missing. If port 22 egress is blocked end to end (some networks), the baked
+  `~/.ssh/config` also declares `ssh.github.com:443` — point the remote at
+  `ssh://git@ssh.github.com:443/owner/repo.git`.
+- **`git@github.com: Permission denied (publickey)`**: no key was provisioned
+  (the sandbox was created without the `~/.ssh/sandbox:ro` mount — recreate it
+  with the mount), the shim didn't run (`ls -l ~/.ssh/github_sandbox`;
+  re-assert with `sh /usr/local/share/sbx/setup-ssh.sh`), or the public key
+  was never granted access on GitHub. In a cursor sandbox the script never
+  runs automatically — run it by hand once. See "GitHub over SSH".
 - **Stale gitnexus index**: re-run the analyze on the host — never inside the
   sandbox.
