@@ -3,18 +3,18 @@
 #
 # Fetches the item with `gh` (title, body, labels, comments; diff stat for
 # PRs), writes it to <workspace>/.local/sbx-context/<issue|pr>-<id>.md, and
-# runs `sbx run --name <agent>-<id>` from the current directory with an
-# initial prompt that points the agent at the context file. The workspace
+# runs `sbx run --clone --name <agent>-<id>` from the current directory with
+# an initial prompt that points the agent at the context file. The workspace
 # mounts at the same absolute path inside the sandbox (read-only in --clone
 # mode), so the file is reachable either way; `.local/` is typically
 # gitignored, so the context file never dirties the workspace's git status.
 #
-# Usage: sbx-issue [--repo owner/name] AGENT ISSUE_OR_PR [SBX_RUN_FLAGS...]
+# Usage: sbx-issue [--repo owner/name] [--no-clone] AGENT ISSUE_OR_PR [SBX_RUN_FLAGS...]
 set -eu
 
 usage() {
   cat <<'EOF'
-usage: sbx-issue [--repo owner/name] AGENT ISSUE_OR_PR [SBX_RUN_FLAGS...]
+usage: sbx-issue [--repo owner/name] [--no-clone] AGENT ISSUE_OR_PR [SBX_RUN_FLAGS...]
 
 Run from the workspace directory. Fetches a GitHub issue or PR and launches
 `sbx run` with the sandbox named <AGENT>-<id> and the item preloaded as
@@ -25,11 +25,19 @@ context.
   ISSUE_OR_PR     issue/PR number, or a full https://github.com/... URL
   --repo          owner/name to fetch from (default: the current repo's
                   origin, or the repo in the URL)
-  SBX_RUN_FLAGS   passed through to `sbx run` (e.g. --clone, -t IMAGE)
+  --no-clone      work directly on the host working tree (default is --clone:
+                  the agent gets a private clone; sync with sbx-git)
+  SBX_RUN_FLAGS   passed through to `sbx run` (e.g. -t IMAGE)
+
+defaults, applied at sandbox creation:
+  --clone, and for claude/codex/cursor also --no-share-skills + the baked
+  template (your own -t wins). Extra dirs are mounted when they exist:
+  $SBX_ISSUE_NOTES_DIR (default /Users/nav/Documents/Notes; set it empty to
+  skip) and ~/.ssh/sandbox:ro (GitHub SSH key — see README "GitHub over SSH").
 
 examples:
   sbx-issue cursor 1234                 # sandbox cursor-1234, issue #1234
-  sbx-issue claude 88 --clone           # clone-mode sandbox claude-88
+  sbx-issue claude 88 --no-clone        # bind-mount sandbox claude-88
   sbx-issue --repo acme/api codex https://github.com/acme/api/pull/42
 
 Re-running with the same AGENT and id re-attaches to the existing sandbox
@@ -39,12 +47,16 @@ EOF
 
 die() { echo "sbx-issue: $*" >&2; exit 1; }
 
-repo=
-case ${1:-} in
-  -h|--help) usage; exit 0 ;;
-  --repo) [ $# -ge 2 ] || die "--repo needs an argument"; repo=$2; shift 2 ;;
-  --repo=*) repo=${1#--repo=}; shift ;;
-esac
+repo= clone=1
+while [ $# -gt 0 ]; do
+  case $1 in
+    -h|--help) usage; exit 0 ;;
+    --repo) [ $# -ge 2 ] || die "--repo needs an argument"; repo=$2; shift 2 ;;
+    --repo=*) repo=${1#--repo=}; shift ;;
+    --no-clone) clone=; shift ;;
+    *) break ;;
+  esac
+done
 [ $# -ge 2 ] || { usage >&2; exit 2; }
 agent=$1 ref=$2
 shift 2
@@ -134,14 +146,24 @@ case $agent in
   codex)  template=docker.io/navcf/sandbox-templates:codex ;;
   cursor) template=docker.io/navcf/sandbox-templates:cursor-agent ;;
 esac
-if [ -n "$template" ]; then
-  for arg in "$@"; do
-    case $arg in -t|--template|--template=*) template= ;; esac  # user override wins
-  done
-fi
+for arg in "$@"; do
+  case $arg in
+    -t|--template|--template=*) template= ;;  # user override wins
+    --clone) clone= ;;                        # already passed, don't duplicate
+  esac
+done
 
-set -- "$@" "$agent" "$workspace" -- "$prompt"
+# Default extra mounts (positional, after the workspace; extra workspaces
+# mount at their host-absolute path). Each is skipped silently when absent:
+# the Notes dir the baked instructions write plans to, and the dedicated
+# GitHub SSH key dir consumed by setup-ssh.sh (read-only).
+notes=${SBX_ISSUE_NOTES_DIR-/Users/nav/Documents/Notes}
+set -- "$@" "$agent" "$workspace"
+[ -n "$notes" ] && [ -d "$notes" ] && set -- "$@" "$notes"
+[ -d "$HOME/.ssh/sandbox" ] && set -- "$@" "$HOME/.ssh/sandbox:ro"
+set -- "$@" -- "$prompt"
 [ -z "$template" ] || set -- --no-share-skills -t "$template" "$@"
+[ -z "$clone" ] || set -- --clone "$@"
 set -- run --name "$agent-$num" "$@"
 echo "==> sbx $*" | head -c 300; echo
 exec sbx "$@"

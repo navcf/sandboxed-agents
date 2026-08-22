@@ -131,6 +131,23 @@ you via `ask_agent`.
 If the tool errors that no sandbox exists for the target agent, relay that to
 the user rather than retrying.
 
+## Clone-mode git
+
+If `/run/sandbox/source` exists, this sandbox runs on a private clone of the
+host repo (`--clone` mode): the user does NOT see your working tree, only
+your commits. Work on a branch and commit early and often — uncommitted
+changes are invisible on the host.
+
+- Pull host updates with `git fetch host`, then `git rebase host/<branch>`
+  when asked to pick them up. The `host` remote is `/run/sandbox/source`, a
+  live read-only mount of the host repo — it sees commits the user makes
+  after this sandbox was created.
+- The host's uncommitted working tree is browsable read-only at
+  `/run/sandbox/source` if you need context that is not committed yet.
+- The user fetches your commits from the host side (`sbx-git`); there is
+  nothing for you to push — never push to `host` (read-only), and the Github
+  rules below still apply to `origin`.
+
 ## Orgmode
 
 Write all plans in /Users/nav/Documents/Notes in Orgmode format. Do not use markdown, 

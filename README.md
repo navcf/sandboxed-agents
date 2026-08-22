@@ -32,6 +32,7 @@ sandbox, and the default sandbox names (`claude-<workdir>`, `codex-<workdir>`,
 | `codex-shim.sh` | Baked to `/home/agent/.local/bin/codex` (shadows the npm-global binary via PATH order); same re-assert/TZ/devstack-then-`exec` pattern |
 | `build.sh` | stage → `docker build` → `docker push`, per agent or all |
 | `host-services.sh` | Self-contained host-side MCP servers: gitnexus on :4747 + agent-bridge on :4748 (lets agents ask each other for reviews); stops both together |
+| `sbx-git.sh` | Host-side sync for `--clone` sandboxes: `ls`/`pull`/`push`/`harvest` — fetch agent branches into worktrees, fan host commits into a sandbox's clone — see "Clone mode: syncing work" |
 | `build/<agent>/` | Generated build contexts (never edit; recreated by `stage.sh`) |
 
 ## Workflow
@@ -88,6 +89,65 @@ sbx create --clone --no-share-skills --name claude-<issue-id> -e TZ=UTC -t docke
 
 Override the image ref with `IMAGE=... ./build.sh claude` (single-agent builds
 only).
+
+## Clone mode: syncing work
+
+With `--clone` the agent works on a private clone of your repo, not on your
+working tree. sbx already provides the plumbing in both directions:
+
+- **Host → sandbox**: your repo is mounted **live and read-only** inside the
+  sandbox at `/run/sandbox/source` (the clone borrows its objects via git
+  alternates). The claude/codex shims register it as the `host` remote in the
+  clone — the agent pulls your commits, including ones made after the sandbox
+  was created, with `git fetch host` (and the shims drop the useless
+  `sandbox-*` remotes the clone copies from your host config). cursor has no
+  shim — one-liner inside the sandbox: `git remote add host /run/sandbox/source`.
+- **Sandbox → host**: each running clone sandbox serves a git daemon on a
+  published loopback port, and sbx maintains a `sandbox-<name>` remote in your
+  repo pointing at it (removed on stop, re-added by `sbx run`). The daemon has
+  no receive-pack, so nothing can be pushed *into* a sandbox — and only
+  **commits** cross in either direction; the baked instructions tell agents to
+  work on a branch and commit early.
+
+`sbx-git.sh` wraps that into four verbs. Put it on your PATH (e.g.
+`ln -s "$PWD/sbx-git.sh" ~/.local/bin/sbx-git`) and run it from the workspace:
+
+```sh
+sbx-git ls                    # every sandbox's branches + how far ahead of your HEAD
+sbx-git pull claude-1234      # fetch + check the agent's branch out in a worktree at
+                              #   ../<repo>-wt/claude-1234-<branch> (local branch
+                              #   sbx/claude-1234/<branch>) — inspect and run tests
+                              #   there without touching your working tree
+sbx-git push claude-1234 main # the sandbox's clone learns your main (a `git fetch
+                              #   host main` inside); the agent still has to
+                              #   `git rebase host/main`
+sbx-git harvest claude-1234   # stopped sandbox: wake it, fetch everything, stop it
+                              #   again — no need to bring the TUI up just to fetch
+```
+
+A typical session:
+
+```sh
+sbx-issue claude 1234                # agent works the issue in its own clone
+sbx-git ls                           # claude-1234: fix/payments … [3 ahead of HEAD]
+sbx-git pull claude-1234             # → ../expedition-wt/claude-1234-fix-payments
+(cd ../expedition-wt/claude-1234-fix-payments && pnpm test)
+git commit …                         # meanwhile you commit on main
+sbx-git push claude-1234 main        # then ask the agent to rebase onto host/main
+# happy with it: merge sbx/claude-1234/fix-payments as usual, sbx rm the sandbox,
+git worktree remove ../expedition-wt/claude-1234-fix-payments
+git branch -d sbx/claude-1234/fix-payments
+```
+
+Worth knowing:
+
+- `sbx-git pull`/`push` can omit the sandbox name when this repo has exactly
+  one; `pull` defaults to the branch the sandbox has checked out.
+- A sandbox woken by `sbx exec` republishes its daemon port but sbx does
+  **not** re-add the git remote — `sbx-git` reads the port from `sbx ls` in
+  that case, which is what makes `harvest` work on stopped sandboxes.
+- Uncommitted sandbox changes never cross; `sbx cp` remains the escape hatch
+  for stray files.
 
 ## GitHub over SSH
 
