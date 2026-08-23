@@ -21,6 +21,7 @@ usage: sbx-git ls
        sbx-git pull [SANDBOX] [BRANCH]
        sbx-git push [SANDBOX] [BRANCH]
        sbx-git harvest SANDBOX
+       sbx-git clean [--force] [SANDBOX] [BRANCH]
 
 Sync commits between the host repo and its --clone sandboxes. Run from
 anywhere inside the workspace repo.
@@ -39,6 +40,11 @@ anywhere inside the workspace repo.
            tell it to `git rebase host/<branch>`
   harvest  fetch from a STOPPED sandbox: wake it with `sbx exec`, fetch all
            branches, stop it again (a running sandbox is left running)
+  clean    undo pull: remove the worktree(s) and local sbx/<sandbox>/*
+           branch(es) for SANDBOX (all of them, or just BRANCH). Refuses a
+           dirty worktree or a branch with commits its sandbox never saw
+           unless --force is given. Once the sandbox itself is gone (sbx rm),
+           also drops the leftover fetch refs and stale remote
 
 SANDBOX is the sbx sandbox name (`sbx ls`), e.g. claude-1234; pull/push may
 omit it when exactly one sandbox remote exists for this repo. Only commits
@@ -54,6 +60,17 @@ die() { echo "sbx-git: $*" >&2; exit 1; }
 
 sbx_state() { # STATUS column for sandbox $1, empty if unknown
   sbx ls 2>/dev/null | awk -v n="$1" '$1 == n { print $3 }'
+}
+
+# Die early when sandbox $sb exists but belongs to another repo — otherwise
+# the daemon rejects the fetch with a misleading "repository not exported".
+# The primary workspace is the first path column in its `sbx ls` row (later
+# paths are extra mounts like Notes or the SSH key dir).
+check_workspace() {
+  ws=$(sbx ls 2>/dev/null | awk -v n="$sb" \
+    '$1 == n { for (i = 2; i <= NF; i++) if ($i ~ /^\//) { sub(/,$/, "", $i); print $i; exit } }')
+  [ -z "$ws" ] || [ "$ws" = "$top" ] \
+    || die "sandbox '$sb' belongs to $ws — run sbx-git from that repo"
 }
 
 # Resolve $sb from an explicit arg, or from the sole sandbox-* remote.
@@ -143,6 +160,7 @@ cmd_ls() {
 
 cmd_pull() {
   resolve_sandbox "${1:-}"
+  check_workspace
   fetch_sandbox || die "cannot reach sandbox '$sb' — is it running? (sbx ls; use 'sbx-git harvest $sb' if stopped)"
   br=${2:-}
   if [ -z "$br" ]; then
@@ -173,6 +191,7 @@ cmd_pull() {
 
 cmd_push() {
   resolve_sandbox "${1:-}"
+  check_workspace
   br=${2:-}
   [ -z "$br" ] || git show-ref -q --verify "refs/heads/$br" \
     || die "no local branch '$br' to push"
@@ -187,10 +206,57 @@ cmd_push() {
   echo "==> sandbox $sb now sees your commits${br:+ on $br} — tell the agent to run: git rebase host/${br:-<branch>}"
 }
 
+cmd_clean() {
+  force=
+  case ${1:-} in -f|--force) force=1; shift ;; esac
+  if [ -n "${1:-}" ]; then
+    sb=${1#sandbox-}
+  else
+    # No remote to resolve from (the sandbox is often already removed) —
+    # infer from the sbx/* branches pull created.
+    set -- $(git for-each-ref 'refs/heads/sbx' --format='%(refname:lstrip=3)' | cut -d/ -f1 | sort -u)
+    case $# in
+      1) sb=$1 ;;
+      0) die "no sbx/* branches to clean" ;;
+      *) die "sbx/* branches exist for several sandboxes ($*) — pass one" ;;
+    esac
+  fi
+  br=${2:-}
+  branches=$(git for-each-ref "refs/heads/sbx/$sb/${br:-}" --format='%(refname:lstrip=2)')
+  [ -n "$branches" ] || die "nothing to clean: no local branch sbx/$sb/${br:-*}"
+  for lbr in $branches; do
+    b=${lbr#sbx/$sb/}
+    wt=$(dirname "$top")/$repo-wt/$sb-$(printf %s "$b" | tr / -)
+    if [ -d "$wt" ]; then
+      git worktree remove ${force:+--force} "$wt" 2>/dev/null \
+        || die "worktree $wt has local changes — commit/stash them, or re-run with --force"
+      echo "==> removed worktree $wt"
+    fi
+    # -d treats "merged into upstream" (= the sandbox saw these commits) as
+    # merged, so a plain re-pulled branch deletes fine even before you merge
+    # it; only commits made locally on top require --force.
+    if [ -n "$force" ]; then git branch -q -D "$lbr"
+    else
+      git branch -q -d "$lbr" \
+        || die "branch $lbr has commits the sandbox never saw — merge them, or re-run with --force"
+    fi
+    echo "==> deleted branch $lbr"
+  done
+  rmdir "$(dirname "$top")/$repo-wt" 2>/dev/null || true
+  # Sandbox gone entirely: nothing will refresh the fetched refs again, and a
+  # crash can leave the sbx-managed remote behind — drop both.
+  if [ -z "$(sbx_state "$sb")" ]; then
+    git remote remove "sandbox-$sb" 2>/dev/null || true
+    git for-each-ref "refs/remotes/sandbox-$sb" --format='%(refname)' \
+      | while read -r r; do git update-ref -d "$r"; done
+  fi
+}
+
 cmd_harvest() {
   sb=${1#sandbox-}
   state=$(sbx_state "$sb")
   [ -n "$state" ] || die "no sandbox named '$sb' (sbx ls)"
+  check_workspace
   # `sbx exec` starts a stopped sandbox; the daemon port lands in `sbx ls`
   # moments later (no remote is re-added on exec — sandbox_target handles it).
   sbx exec "$sb" -- true >/dev/null 2>&1 || die "cannot start sandbox '$sb'"
@@ -223,5 +289,6 @@ case $cmd in
   pull)    cmd_pull "$@" ;;
   push)    cmd_push "$@" ;;
   harvest) [ $# -ge 1 ] || die "harvest needs a sandbox name (sbx ls)"; cmd_harvest "$@" ;;
+  clean)   cmd_clean "$@" ;;
   *)       die "unknown command '$cmd' (see: sbx-git --help)" ;;
 esac

@@ -123,6 +123,9 @@ sbx-git push claude-1234 main # the sandbox's clone learns your main (a `git fet
                               #   `git rebase host/main`
 sbx-git harvest claude-1234   # stopped sandbox: wake it, fetch everything, stop it
                               #   again — no need to bring the TUI up just to fetch
+sbx-git clean claude-1234     # undo pull: remove the worktree + sbx/... branch
+                              #   (--force for dirty/unmerged; after sbx rm it also
+                              #   prunes the fetch refs and stale remote)
 ```
 
 A typical session:
@@ -134,9 +137,9 @@ sbx-git pull claude-1234             # → ../expedition-wt/claude-1234-fix-paym
 (cd ../expedition-wt/claude-1234-fix-payments && pnpm test)
 git commit …                         # meanwhile you commit on main
 sbx-git push claude-1234 main        # then ask the agent to rebase onto host/main
-# happy with it: merge sbx/claude-1234/fix-payments as usual, sbx rm the sandbox,
-git worktree remove ../expedition-wt/claude-1234-fix-payments
-git branch -d sbx/claude-1234/fix-payments
+# happy with it: merge sbx/claude-1234/fix-payments as usual, then
+sbx rm claude-1234
+sbx-git clean claude-1234            # drop the worktree, local branch, fetch refs
 ```
 
 Worth knowing:
