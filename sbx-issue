@@ -126,9 +126,21 @@ else
 fi
 echo "==> context written to $ctx_file"
 
+# Issues: understand and propose, never implement unprompted. PRs: review and
+# report findings; the review itself proceeds, but the code stays untouched.
 case $kind in
-  issue) kind_label=issue extras= ;;
-  pr)    kind_label='pull request' extras=', diff stat' ;;
+  issue)
+    kind_label=issue extras=
+    task="Read that file first, then build an understanding of the problem: explore the parts of the codebase it touches and reference the relevant files/symbols by path.
+
+Do NOT implement anything yet. Reply with (1) a short summary of the problem in your own words, (2) a potential solution — the approach you would take, the files you would change, and any risks or open questions — and then wait for further instructions before making changes." ;;
+  pr)
+    kind_label='pull request' extras=', diff stat'
+    task="Read that file first (it names the head and base branches), fetch the PR branch (e.g. git fetch origin <head>), and study the diff against the base until you understand what the change does and the problem it is solving.
+
+Then review it — correctness bugs, edge cases, security or performance risks, missing tests, needless complexity — verifying suspicions against the actual code rather than the diff alone.
+
+Do NOT modify any code. Present your findings: (1) a short summary of what the PR does and why, (2) the issues found, ordered by severity, each referencing file/line, or a note that you found none, and (3) an overall assessment (looks good / needs changes). Then wait for further instructions." ;;
 esac
 prompt="You are working on GitHub $kind_label #$num in $repo: \"$title\".
 
@@ -136,7 +148,7 @@ The full $kind_label content (description, labels, comments$extras) is saved at:
   $ctx_file
 (In clone mode that path is the read-only host mount, not your working clone.)
 
-Read that file first, then address the $kind_label: understand the request, implement the fix or change it asks for (for a pull request, act on the feedback it contains), and verify your work before finishing."
+$task"
 
 # Repo-baked templates need --no-share-skills so the shared store does not
 # shadow the baked skills (see README); other agents use sbx's stock image.
