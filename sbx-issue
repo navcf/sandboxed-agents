@@ -27,6 +27,9 @@ context.
                   origin, or the repo in the URL)
   --no-clone      work directly on the host working tree (default is --clone:
                   the agent gets a private clone; sync with sbx-git)
+  --prep-only     fetch context and create the sandbox, then print
+                  sandbox=/context= lines and exit instead of attaching the
+                  TUI — for headless drivers (`sbx exec NAME claude -p ...`)
   SBX_RUN_FLAGS   passed through to `sbx run` (e.g. -t IMAGE)
 
 defaults, applied at sandbox creation:
@@ -47,13 +50,14 @@ EOF
 
 die() { echo "sbx-issue: $*" >&2; exit 1; }
 
-repo= clone=1
+repo= clone=1 prep_only=
 while [ $# -gt 0 ]; do
   case $1 in
     -h|--help) usage; exit 0 ;;
     --repo) [ $# -ge 2 ] || die "--repo needs an argument"; repo=$2; shift 2 ;;
     --repo=*) repo=${1#--repo=}; shift ;;
     --no-clone) clone=; shift ;;
+    --prep-only) prep_only=1; shift ;;
     *) break ;;
   esac
 done
@@ -126,6 +130,13 @@ else
 fi
 echo "==> context written to $ctx_file"
 
+# --prep-only with an existing sandbox: nothing to create, just report it.
+if [ -n "$prep_only" ] && sbx ls -q 2>/dev/null | grep -qx "$agent-$num"; then
+  echo "==> sandbox $agent-$num already exists; context refreshed"
+  printf 'sandbox=%s\ncontext=%s\nrepo=%s\nkind=%s\n' "$agent-$num" "$ctx_file" "$repo" "$kind"
+  exit 0
+fi
+
 # Issues: understand and propose, never implement unprompted. PRs: review and
 # report findings; the review itself proceeds, but the code stays untouched.
 case $kind in
@@ -173,9 +184,17 @@ notes=${SBX_ISSUE_NOTES_DIR-/Users/nav/Documents/Notes}
 set -- "$@" "$agent" "$workspace"
 [ -n "$notes" ] && [ -d "$notes" ] && set -- "$@" "$notes"
 [ -d "$HOME/.ssh/sandbox" ] && set -- "$@" "$HOME/.ssh/sandbox:ro"
-set -- "$@" -- "$prompt"
+[ -n "$prep_only" ] || set -- "$@" -- "$prompt"
 [ -z "$template" ] || set -- --no-share-skills -t "$template" "$@"
 [ -z "$clone" ] || set -- --clone "$@"
+if [ -n "$prep_only" ]; then
+  # Create without attaching; the caller drives the agent headlessly.
+  set -- create --name "$agent-$num" "$@"
+  echo "==> sbx $*" | head -c 300; echo
+  sbx "$@"
+  printf 'sandbox=%s\ncontext=%s\nrepo=%s\nkind=%s\n' "$agent-$num" "$ctx_file" "$repo" "$kind"
+  exit 0
+fi
 set -- run --name "$agent-$num" "$@"
 echo "==> sbx $*" | head -c 300; echo
 exec sbx "$@"
