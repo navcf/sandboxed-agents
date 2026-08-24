@@ -18,7 +18,7 @@ set -eu
 usage() {
   cat <<'EOF'
 usage: sbx-git ls
-       sbx-git pull [SANDBOX] [BRANCH]
+       sbx-git pull [--force] [SANDBOX] [BRANCH]
        sbx-git push [SANDBOX] [BRANCH]
        sbx-git harvest SANDBOX
        sbx-git clean [--force] [SANDBOX] [BRANCH]
@@ -33,7 +33,10 @@ anywhere inside the workspace repo.
            ../<repo>-wt/<sandbox>-<branch>, on local branch
            sbx/<sandbox>/<branch> — inspect and run tests there without
            touching your working tree. BRANCH defaults to the branch checked
-           out in the sandbox
+           out in the sandbox. When the sandbox amended/rebased commits you
+           already pulled, the worktree follows the rewrite automatically —
+           unless it has local changes or commits, which need --force (or a
+           manual rescue) to discard
   push     make the sandbox's clone see your host commits: runs
            `git fetch host [BRANCH]` inside the sandbox (`host` is the live
            read-only mount of this repo). The agent still has to rebase —
@@ -159,6 +162,8 @@ cmd_ls() {
 }
 
 cmd_pull() {
+  force=
+  case ${1:-} in -f|--force) force=1; shift ;; esac
   resolve_sandbox "${1:-}"
   check_workspace
   fetch_sandbox || die "cannot reach sandbox '$sb' — is it running? (sbx ls; use 'sbx-git harvest $sb' if stopped)"
@@ -172,16 +177,29 @@ cmd_pull() {
   git rev-parse -q --verify "$ref" >/dev/null || die "sandbox '$sb' has no branch '$br'"
   lbr=sbx/$sb/$br
   wt=$(dirname "$top")/$repo-wt/$sb-$(printf %s "$br" | tr / -)
-  ff_or_die() {
-    git -C "$wt" merge --ff-only "$ref" >/dev/null 2>&1 \
-      || die "worktree cannot fast-forward to $ref (agent rebased, or local edits?) — inspect $wt, or discard its state with: git -C \"$wt\" reset --hard $ref"
+  sync_worktree() {
+    git -C "$wt" merge --ff-only "$ref" >/dev/null 2>&1 && return 0
+    # Non-fast-forward: the agent amended or rebased commits we already
+    # pulled. Following the rewrite is the normal case — refuse only when the
+    # reset could lose something local: uncommitted changes, or a tip the
+    # sandbox ref never pointed at (i.e. commits made here, not in the
+    # sandbox; past tips are read from the remote-tracking ref's reflog).
+    old=$(git -C "$wt" rev-parse --short HEAD)
+    if [ -z "$force" ]; then
+      [ -z "$(git -C "$wt" status --porcelain)" ] \
+        || die "sandbox '$sb' rewrote '$br', but the worktree has local changes — commit/stash them in $wt, or discard everything with: sbx-git pull --force $sb $br"
+      git rev-list -g "$ref" 2>/dev/null | grep -qx "$(git -C "$wt" rev-parse HEAD)" \
+        || die "sandbox '$sb' rewrote '$br', but the worktree has local commits (tip $old was never a sandbox tip) — rescue them, or discard with: sbx-git pull --force $sb $br"
+    fi
+    git -C "$wt" reset --hard "$ref" >/dev/null
+    echo "==> sandbox rewrote $br (amend/rebase) — worktree reset: $old -> $(git rev-parse --short "$ref")"
   }
   if [ -d "$wt" ]; then
-    ff_or_die
+    sync_worktree
   elif git show-ref -q --verify "refs/heads/$lbr"; then
     mkdir -p "$(dirname "$wt")"
     git worktree add "$wt" "$lbr"
-    ff_or_die
+    sync_worktree
   else
     mkdir -p "$(dirname "$wt")"
     git worktree add -b "$lbr" "$wt" "$ref"
