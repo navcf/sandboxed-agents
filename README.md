@@ -16,8 +16,9 @@ sandbox, and the default sandbox names (`claude-<workdir>`, `codex-<workdir>`,
 | `skills.txt` | Declarative skill sources, one `npx skills add` source per line |
 | `stage.sh` | Installs sources into `build/<agent>/` via the [Vercel skills CLI](https://vercel.com/docs/agent-resources/skills) |
 | `skills-local/` | Curated local skills, referenced from the manifest |
-| `config/CLAUDE.md` | Baked global Claude instructions (RTK + gitnexus usage) |
+| `config/CLAUDE.md` | Baked global Claude instructions — short, universal rules only; task detail lives in `config/agent-docs/` |
 | `config/AGENTS.md` | Baked global Codex instructions (same content, hook-less RTK) |
+| `config/agent-docs/` | Baked to `/usr/local/share/sbx/docs/`: progressive-disclosure companions the instruction files point at (devstack details, Docker route-arounds, testing/screenshots) |
 | `config/gitnexus-mcp.cjs` | Merges the host MCP entries (gitnexus + agent-bridge) into `~/.claude.json` |
 | `config/gitnexus-mcp-codex.sh` | Grep-guard-appends the host MCP entries to `~/.codex/config.toml` |
 | `config/gitnexus-mcp-cursor.cjs` | Merges the host MCP entries into `~/.cursor/mcp.json` |

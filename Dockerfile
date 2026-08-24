@@ -71,6 +71,9 @@ COPY config/fix-tz.sh /usr/local/share/sbx/fix-tz.sh
 # No-op when no key is mounted. See README "GitHub over SSH".
 COPY config/setup-ssh.sh /usr/local/share/sbx/setup-ssh.sh
 COPY config/github-known-hosts /usr/local/share/sbx/github-known-hosts
+# Progressive-disclosure companions to the baked CLAUDE.md/AGENTS.md: the core
+# instruction files stay short and point here for task-specific detail.
+COPY config/agent-docs/ /usr/local/share/sbx/docs/
 
 # sbx forwards the host's TZ, and macOS sends abbreviations like "PDT7" — not a
 # valid IANA zone. Intl then resolves timeZone to undefined and every
