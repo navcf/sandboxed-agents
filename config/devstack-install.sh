@@ -34,11 +34,14 @@ export DEBIAN_FRONTEND=noninteractive
 # images set NPM_CONFIG_PREFIX to a dir that already holds agent CLIs, so the
 # shared tools are kept apart from it rather than merged into it.
 for b in node npm npx; do ln -sf "/opt/node/bin/$b" "/usr/local/bin/$b"; done
-for b in pnpm tsc tsserver tsx; do ln -sf "/opt/node-tools/bin/$b" "/usr/local/bin/$b"; done
+for b in pnpm tsc tsserver tsx playwright; do ln -sf "/opt/node-tools/bin/$b" "/usr/local/bin/$b"; done
 # Fail here, not at first use, if the copied artifacts are broken.
 /usr/local/bin/node -p "process.versions.amaro || (() => { throw new Error('amaro missing') })()"
 /usr/local/bin/tsc --version
 /usr/local/bin/tsx --version
+# The global CLI must match the baked browsers exactly, or one-off commands
+# like `playwright screenshot` die with "Executable doesn't exist".
+[ "$(/usr/local/bin/playwright --version)" = "Version ${PLAYWRIGHT_VERSION}" ]
 
 # Playwright resolves browsers at ~/.cache/ms-playwright by default; point that
 # at the shared root-owned copy. install -d (rather than letting a Dockerfile
@@ -67,6 +70,11 @@ ln -s /opt/ms-playwright /home/agent/.cache/ms-playwright
 # /opt/ms-playwright). If a workload needs the ffmpeg CLI, bake a static build
 # in the artifacts stage instead of reintroducing the apt package.
 #
+# python3-pil (a few MB; python3 is already in the base image) is the image
+# tool: without it, cropping/inspecting an existing screenshot requires a
+# second live page load with hand-computed clip boxes. Deliberately not
+# imagemagick — same weight argument as ffmpeg.
+#
 # docker-clean would delete downloaded .debs; keep them for the cache mount.
 rm -f /etc/apt/apt.conf.d/docker-clean
 apt-get update
@@ -75,6 +83,7 @@ apt-get install -y --no-install-recommends \
     "postgresql-${PG_MAJOR}" \
     "postgresql-${PG_MAJOR}-cron" \
     "postgresql-client-${PG_MAJOR}" \
+    python3-pil \
     xvfb
 
 # Debian/Ubuntu's postgresql.conf already ends with `include_dir = 'conf.d'`, so
@@ -122,7 +131,7 @@ update-ca-certificates
 # fine on 26.04), then assert every library actually resolves.
 cp /etc/os-release /etc/os-release.real
 sed -i 's/^VERSION_ID="26.04"/VERSION_ID="24.04"/; s/resolute/noble/g' /etc/os-release
-/usr/local/bin/npx --yes "playwright@${PLAYWRIGHT_VERSION}" install-deps chromium-headless-shell
+/usr/local/bin/playwright install-deps chromium-headless-shell
 mv -f /etc/os-release.real /etc/os-release
 if ldd /opt/ms-playwright/chromium_headless_shell-*/chrome-linux/headless_shell | grep "not found"; then
   echo "headless_shell is missing shared libraries — install-deps skipped this distro?" >&2

@@ -23,7 +23,7 @@ sandbox, and the default sandbox names (`claude-<workdir>`, `codex-<workdir>`,
 | `config/gitnexus-mcp-codex.sh` | Grep-guard-appends the host MCP entries to `~/.codex/config.toml` |
 | `config/gitnexus-mcp-cursor.cjs` | Merges the host MCP entries into `~/.cursor/mcp.json` |
 | `config/devstack-install.sh` | Per-agent dev stack install: Postgres 18 + pg_cron, xvfb, Chromium headless-shell deps, plus PATH wiring for the shared artifacts |
-| `config/devstack-node.sh` | Artifacts-stage download: official Node build + global pnpm/TypeScript/tsx (`/opt/node`, `/opt/node-tools`) |
+| `config/devstack-node.sh` | Artifacts-stage download: official Node build + global pnpm/TypeScript/tsx + a `playwright` CLI pinned to the baked browsers (`/opt/node`, `/opt/node-tools`) |
 | `config/install-browsers.sh` | Artifacts-stage Playwright browser download to `/opt/ms-playwright` (works around the missing arm64 build) |
 | `config/devstack` | Baked to `/usr/local/bin/devstack`; project-agnostic lifecycle (start pg, `.env` bootstrap, migrate, seed), configured per workspace via `.local/.devstack.conf` |
 | `config/fix-tz.sh` | Sourced by the shims and `devstack`: replaces a non-IANA inherited `TZ` (macOS "PDT7") with UTC |

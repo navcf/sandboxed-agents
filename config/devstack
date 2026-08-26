@@ -149,10 +149,20 @@ db_bootstrap() {
 }
 
 # Apps read config from .env, which is gitignored and therefore absent from a
-# fresh clone. Copy the committed example when there is no .env yet; an existing
-# .env (possibly hand-edited) is never touched.
+# fresh clone — and from a fresh `git worktree add`. A linked worktree prefers
+# the main worktree's real .env (it points at the already-bootstrapped stack;
+# the committed example would mean re-deriving everything); everything else
+# falls back to .env.example. An existing .env (possibly hand-edited) is never
+# touched.
 env_file() {
-  if [ -f "${REPO}/.env.example" ] && [ ! -f "${REPO}/.env" ]; then
+  [ -f "${REPO}/.env" ] && return 0
+  local common main=""
+  common="$(git -C "${REPO}" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)"
+  case "$common" in */.git) main="${common%/.git}" ;; esac
+  if [ -n "$main" ] && [ "$main" != "${REPO}" ] && [ -f "${main}/.env" ]; then
+    cp "${main}/.env" "${REPO}/.env"
+    ok "Created .env from the main worktree's .env (${main})"
+  elif [ -f "${REPO}/.env.example" ]; then
     cp "${REPO}/.env.example" "${REPO}/.env"
     ok "Created .env from .env.example"
   fi
@@ -194,14 +204,20 @@ migrate() {
   die "migrate failed"
 }
 
+# Count of user tables in $DB_NAME; empty output when the database is
+# unreachable or not yet created.
+user_table_count() {
+  psql_as -d "${DB_NAME}" -tAc \
+    "SELECT count(*) FROM pg_tables WHERE schemaname NOT IN ('pg_catalog','information_schema')" \
+    2>/dev/null | tr -d '[:space:]'
+}
+
 # True when $DB_NAME already contains user tables. `up` uses this to stay
 # non-destructive: a MIGRATE_CMD is commonly a full rebuild (e.g. `db reset`),
 # so re-running it on every `up` would wipe data an agent has built up.
 db_has_schema() {
   local n
-  n="$(psql_as -d "${DB_NAME}" -tAc \
-        "SELECT count(*) FROM pg_tables WHERE schemaname NOT IN ('pg_catalog','information_schema')" \
-        2>/dev/null | tr -d '[:space:]')"
+  n="$(user_table_count)"
   [ "${n:-0}" -gt 0 ] 2>/dev/null
 }
 
@@ -211,12 +227,18 @@ no_conf_warning() {
   warn "If this project has migrations, create .local/.devstack.conf (DB_NAME, MIGRATE_CMD, SEED_CMD, …)."
 }
 
+# Seed scripts are often the only place the created records' URLs, logins and
+# ids ever appear, so keep a copy of the output where it stays greppable.
+SEED_LOG=.local/devstack-seed.log
+
 seed() {
   [ -n "${SEED_CMD}" ] || return 0
   [ "${SEED_PRESET}" = none ] && { log "Skipping seed"; return 0; }
   log "Seeding (${SEED_PRESET})…"
-  (cd "${REPO}" && SEED_PRESET="${SEED_PRESET}" eval "${SEED_CMD}")
-  ok "Seeded"
+  mkdir -p "${REPO}/.local"
+  (cd "${REPO}" && SEED_PRESET="${SEED_PRESET}" eval "${SEED_CMD}") 2>&1 \
+    | tee "${REPO}/${SEED_LOG}"
+  ok "Seeded — output kept at ${SEED_LOG} (grep it for seeded URLs/logins)"
 }
 
 parse_flags() {
@@ -250,6 +272,14 @@ case "$cmd" in
               "select 'schemas: '||count(*) from information_schema.schemata
                  where schema_name not like 'pg\_%' and schema_name <> 'information_schema'" \
               2>/dev/null || echo "schemas: (database '${DB_NAME}' not bootstrapped)"
+            # A green-looking stack with zero tables means nothing was ever
+            # migrated — the single most misleading state, so call it out.
+            n="$(user_table_count || true)"
+            case "${n:-}" in
+              '') ;;
+              0)  echo "tables: 0 — database '${DB_NAME}' is EMPTY ('devstack up' migrates+seeds it; needs MIGRATE_CMD/SEED_CMD in a devstack config)" ;;
+              *)  echo "tables: ${n}" ;;
+            esac
           fi
           if [ -d "${REPO}/node_modules" ]; then echo "node_modules: present"
           else echo "node_modules: absent"; fi
@@ -259,6 +289,7 @@ case "$cmd" in
           echo "TZ: ${TZ:-unset}"
           echo "node: $(node -v 2>/dev/null) (amaro $(node -p 'process.versions.amaro' 2>/dev/null || echo none))"
           echo "tsc:  $(tsc --version 2>/dev/null | tail -1) [global fallback; a workspace's own copy wins]"
+          echo "playwright: $(playwright --version 2>/dev/null || echo none) [pinned to the baked browsers — use \`playwright\`, not bare \`npx playwright\`]"
           # A failed `playwright install` leaves the cache dir present but with
           # only its bookkeeping dotfiles (`.links`), so test for real entries:
           # plain `ls` (no -A) skips dotfiles and yields nothing in that case.

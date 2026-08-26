@@ -17,6 +17,9 @@ NODE_VERSION=v22.22.1
 PNPM_VERSION=10.33.4
 TYPESCRIPT_VERSION=5.9.3
 TSX_VERSION=4.20.6
+# Must match the baked browsers (install-browsers.sh) — the CLI refuses to
+# launch a browser directory from a different Playwright version.
+PLAYWRIGHT_VERSION=1.58.2
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 1. Node.js — official build, for TypeScript type stripping
@@ -63,10 +66,18 @@ rm -rf /opt/node/include /opt/node/CHANGELOG.md \
 # copies are the fallback for everything else — scratch `.ts` files, a repo
 # before its install has run, and one-off scripts outside any workspace.
 #
+# The playwright CLI is pinned for the same reason: a bare `npx playwright`
+# resolves whatever is newest (or whatever the npx cache holds — different
+# invocations can even resolve DIFFERENT versions), which then can't find the
+# baked browsers and fails with "Executable doesn't exist". A workspace's own
+# node_modules copy still wins for tests; this global is for one-offs like
+# `playwright screenshot`.
+#
 # --prefix keeps the tools in a self-contained dir to COPY into agent images,
 # out of NPM_CONFIG_PREFIX (which in those images already holds agent CLIs).
 /opt/node/bin/npm install -g --prefix /opt/node-tools \
     "pnpm@${PNPM_VERSION}" \
     "typescript@${TYPESCRIPT_VERSION}" \
-    "tsx@${TSX_VERSION}"
-for b in pnpm tsc tsserver tsx; do test -e "/opt/node-tools/bin/$b"; done
+    "tsx@${TSX_VERSION}" \
+    "playwright@${PLAYWRIGHT_VERSION}"
+for b in pnpm tsc tsserver tsx playwright; do test -e "/opt/node-tools/bin/$b"; done

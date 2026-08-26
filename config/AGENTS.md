@@ -16,9 +16,10 @@ read the relevant one BEFORE working around an environment limitation.
   Details (config keys, TLS, TZ gotcha): docs/devstack.md
 - Never install docker or run `docker compose` — when project tooling shells
   out to Docker, route around it: docs/no-docker.md
-- Browser work is headless-only; never run `playwright install` (the download
-  is blocked — report a pinned-version mismatch to the user instead).
-  Tests, screenshots, recordings: docs/testing.md
+- Browser work is headless-only. Use the baked `playwright` CLI, never bare
+  `npx playwright` (resolves a mismatched version), and never run
+  `playwright install` (the download is blocked — report a pinned-version
+  mismatch to the user instead). Tests, screenshots, recordings: docs/testing.md
 - Put artifacts the user should open (screenshots, videos, reports) under the
   workspace, e.g. `.local/artifacts/`.
 

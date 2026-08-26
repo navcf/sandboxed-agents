@@ -3,10 +3,13 @@
 `devstack up` is idempotent and non-destructive. It starts PostgreSQL 18
 (pg_cron preloaded via a baked drop-in), sets the postgres/postgres password,
 creates the workspace database (name from the config file, else inferred from
-`.env`/`.env.example`) and points `cron.database_name` at it, copies
-`.env.example` → `.env` when `.env` is missing, runs `pnpm install` when
-`node_modules` is absent, and migrates + seeds ONLY when the database is still
-empty. `devstack reset` is the explicit rebuild — it wipes and
+`.env`/`.env.example`) and points `cron.database_name` at it, bootstraps a
+missing `.env` (in a linked git worktree: copied from the main worktree's
+`.env`, so the worktree reuses the already-built stack; otherwise from
+`.env.example`), runs `pnpm install` when `node_modules` is absent, and
+migrates + seeds ONLY when the database is still empty. Seed output is kept
+at `.local/devstack-seed.log` — grep it for the URLs/logins/ids the seed
+script created instead of re-deriving them. `devstack reset` is the explicit rebuild — it wipes and
 re-migrates/re-seeds. `devstack status` shows what is up; heed its warning if
 no devstack config was found (the database exists but was never migrated or
 seeded).
