@@ -1,6 +1,0 @@
-#+TITLE: Document Title
-#+AUTHOR: Author Name
-# Keep under_scores and x^2 literal (no sub/superscripts) in ALL exporters:
-#+OPTIONS: ^:nil
-#+OPTIONS: toc:2 num:t
-#+SETUPFILE: ~/.config/doom/org-html.setup

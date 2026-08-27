@@ -23,6 +23,17 @@ read the relevant one BEFORE working around an environment limitation.
 - Put artifacts the user should open (screenshots, videos, reports) under the
   workspace, e.g. `.local/artifacts/`.
 
+## Skills
+
+Skills come from the `navcf/nav-skills` git repo, not from this image, and were
+fast-forwarded at launch. Manage them with `/nav-skills:sync`, `:list`, `:new`,
+`:doctor`, `:harvest` (or the `nav-skills` CLI).
+
+- Edit the clone at `~/.local/share/nav-skills`, never `~/.claude/skills` — the
+  next sync overwrites the latter.
+- `nav-skills harvest` packages your edits as a patch for the user to review.
+  Never commit or push skill changes.
+
 ## RTK — token-optimized CLI proxy
 
 Hooks are pre-wired: commands like `git status` are transparently rewritten

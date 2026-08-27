@@ -10,6 +10,11 @@ node /usr/local/share/sbx/claude-settings-merge.cjs || echo 'warn: settings merg
 sh /usr/local/share/sbx/setup-ssh.sh || echo 'warn: github ssh setup failed' >&2
 # Replace a non-IANA inherited TZ (macOS "PDT7") with UTC — see fix-tz.sh.
 . /usr/local/share/sbx/fix-tz.sh
+# Fast-forward the skill set from navcf/nav-skills and materialize it into
+# ~/.claude/skills, so a pushed skill change lands without an image rebuild.
+# Non-fatal: a failed sync leaves the baked snapshot in place. Refuses rather
+# than overwriting when the skills dir has local edits — `nav-skills harvest`.
+nav-skills sync || echo 'warn: skills sync failed — using the baked snapshot; diagnose with `nav-skills status`' >&2
 # Bring the workspace's dev stack up before the agent starts. devstack up is
 # idempotent and non-destructive, so the first launch pays the real cost and
 # later launches are a ~1s no-op that also restarts Postgres after a sandbox

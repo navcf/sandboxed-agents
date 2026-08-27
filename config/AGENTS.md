@@ -23,6 +23,21 @@ read the relevant one BEFORE working around an environment limitation.
 - Put artifacts the user should open (screenshots, videos, reports) under the
   workspace, e.g. `.local/artifacts/`.
 
+## Skills
+
+Skills come from the `navcf/nav-skills` git repo, not from this image, and were
+fast-forwarded at launch. Manage them with the `nav-skills` CLI: `list`, `sync`,
+`new <name> <user|model|both>`, `doctor`, `harvest`.
+
+- Edit the clone at `~/.local/share/nav-skills`, never `~/.codex/skills` — the
+  next sync overwrites the latter. Codex's own built-ins under
+  `~/.codex/skills/.system` are never touched.
+- Codex ignores `disable-model-invocation`; a user-only skill needs
+  `policy.allow_implicit_invocation: false` in its `agents/openai.yaml`.
+  `nav-skills doctor` checks this.
+- `nav-skills harvest` packages your edits as a patch for the user to review.
+  Never commit or push skill changes.
+
 ## RTK — token-optimized CLI proxy
 
 No hooks are wired for Codex — prefix high-volume commands yourself:

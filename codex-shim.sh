@@ -10,6 +10,11 @@ sh /usr/local/share/sbx/codex-settings.sh || echo 'warn: custom settings append 
 sh /usr/local/share/sbx/setup-ssh.sh || echo 'warn: github ssh setup failed' >&2
 # Replace a non-IANA inherited TZ (macOS "PDT7") with UTC — see fix-tz.sh.
 . /usr/local/share/sbx/fix-tz.sh
+# Fast-forward the skill set from navcf/nav-skills and materialize it into
+# ~/.codex/skills, so a pushed skill change lands without an image rebuild.
+# Non-fatal: a failed sync leaves the baked snapshot in place. Codex's own
+# built-ins under ~/.codex/skills/.system are never touched.
+nav-skills sync || echo 'warn: skills sync failed — using the baked snapshot; diagnose with `nav-skills status`' >&2
 # Bring the workspace's dev stack up before the agent starts. devstack up is
 # idempotent and non-destructive, so the first launch pays the real cost and
 # later launches are a ~1s no-op that also restarts Postgres after a sandbox

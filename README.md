@@ -1,9 +1,12 @@
 # Claude Code + Codex + Cursor sandbox templates
 
 Custom [Docker Sandboxes](https://docs.docker.com/ai/sandboxes/) templates with
-RTK, the gitnexus MCP server (host-connected), and skills baked in at build
-time. No kits, no runtime init — the sandbox is fully configured before the
-agent launches. Point multiple agents at the same workspace to have them
+RTK and the gitnexus MCP server (host-connected) baked in, and skills
+delivered from git rather than baked: they are committed content in
+[`navcf/nav-skills`](https://github.com/navcf/nav-skills), baked into the image
+as an offline floor and fast-forwarded at every agent launch, so changing a
+skill needs a push rather than a rebuild. No kits; config is fully in place
+before the agent launches. Point multiple agents at the same workspace to have them
 review each other's work: the workspace is the same bind-mount in every
 sandbox, and the default sandbox names (`claude-<workdir>`, `codex-<workdir>`,
 `cursor-<workdir>`) never collide.
@@ -13,9 +16,7 @@ sandbox, and the default sandbox names (`claude-<workdir>`, `codex-<workdir>`,
 | Path | Purpose |
 |---|---|
 | `Dockerfile` | All three template images on top of `docker/sandbox-templates:{claude-code,codex,cursor-agent}` — one target per agent (`claude`/`codex`/`cursor`), sharing an `artifacts` stage (rtk, Node, TS toolchain, Playwright browsers) that downloads once and `COPY --link`s into each image as identical blobs |
-| `skills.txt` | Declarative skill sources, one `npx skills add` source per line |
-| `stage.sh` | Installs sources into `build/<agent>/` via the [Vercel skills CLI](https://vercel.com/docs/agent-resources/skills) |
-| `skills-local/` | Curated local skills, referenced from the manifest |
+| `config/nav-skills` | Baked to `/usr/local/bin/nav-skills`: fast-forwards the [`navcf/nav-skills`](https://github.com/navcf/nav-skills) clone and materializes it into the agent's skills dir; also `materialize`/`status`/`list`/`new`/`doctor`/`harvest` |
 | `config/CLAUDE.md` | Baked global Claude instructions — short, universal rules only; task detail lives in `config/agent-docs/` |
 | `config/AGENTS.md` | Baked global Codex instructions (same content, hook-less RTK) |
 | `config/agent-docs/` | Baked to `/usr/local/share/sbx/docs/`: progressive-disclosure companions the instruction files point at (devstack details, Docker route-arounds, testing/screenshots) |
@@ -29,17 +30,24 @@ sandbox, and the default sandbox names (`claude-<workdir>`, `codex-<workdir>`,
 | `config/fix-tz.sh` | Sourced by the shims and `devstack`: replaces a non-IANA inherited `TZ` (macOS "PDT7") with UTC |
 | `config/setup-ssh.sh` | Run by the shims at every launch: copies a host-mounted GitHub deploy key into `~/.ssh` (0600, agent-owned) and writes `~/.ssh/config` + `known_hosts`; silent no-op when no key is mounted — see "GitHub over SSH" |
 | `config/github-known-hosts` | GitHub's published SSH host keys (from `api.github.com/meta`), baked so the first git-over-SSH operation never hangs on a host-key prompt |
-| `claude-shim.sh` | Baked to `/home/agent/.local/bin/claude` (real launcher moved to `claude-real`); re-asserts config sbx clobbers, fixes TZ, runs `devstack up`, then `exec`s the real claude |
-| `codex-shim.sh` | Baked to `/home/agent/.local/bin/codex` (shadows the npm-global binary via PATH order); same re-assert/TZ/devstack-then-`exec` pattern |
-| `build.sh` | stage → `docker build` → `docker push`, per agent or all |
+| `config/cursor-session-start.sh` | cursor's `sessionStart` hook — the shim it never had: syncs skills and injects the sandbox guidance cursor has no global instructions file to hold |
+| `config/cursor-hooks-merge.cjs` | Merges that hook into `~/.cursor/hooks.json` after `rtk init`, which owns `preToolUse` in the same file |
+| `claude-shim.sh` | Baked to `/home/agent/.local/bin/claude` (real launcher moved to `claude-real`); re-asserts config sbx clobbers, fixes TZ, syncs skills, runs `devstack up`, then `exec`s the real claude |
+| `codex-shim.sh` | Baked to `/home/agent/.local/bin/codex` (shadows the npm-global binary via PATH order); same re-assert/TZ/skills/devstack-then-`exec` pattern |
+| `build.sh` | `docker build` → `docker push`, per agent or all |
 | `host-services.sh` | Self-contained host-side MCP servers: gitnexus on :4747 + agent-bridge on :4748 (lets agents ask each other for reviews); stops both together |
 | `sbx-git.sh` | Host-side sync for `--clone` sandboxes: `ls`/`pull`/`push`/`harvest` — fetch agent branches into worktrees, fan host commits into a sandbox's clone — see "Clone mode: syncing work" |
-| `build/<agent>/` | Generated build contexts (never edit; recreated by `stage.sh`) |
 
 ## Workflow
 
 ```sh
-./build.sh          # stage skills, build, push all images (or ./build.sh claude|codex|cursor)
+# One-time: the skills repo must be checked out beside this one, since the
+# image bakes its skill-set floor from a local checkout (it is private, so the
+# build cannot clone it — a credential must never land in a layer).
+git clone git@github.com:navcf/nav-skills.git ../nav-skills
+
+./build.sh          # build and push all images (or ./build.sh claude|codex|cursor)
+                    # NAV_SKILLS_SRC=<path> overrides the checkout location
 ./host-services.sh  # on the host, in a separate terminal — gitnexus MCP on :4747
                     # + agent-to-agent bridge on :4748
 
@@ -155,11 +163,32 @@ Worth knowing:
 
 ## GitHub over SSH
 
-Optional: sandboxes reach GitHub over HTTPS out of the box; SSH remotes
+Sandboxes reach GitHub over HTTPS out of the box; SSH remotes
 (`git@github.com:owner/repo.git`) need a key. The key is **never baked into an
 image** — images are pushed to a registry, and a secret in a layer is
 published. Instead the host mounts a dedicated key directory at sandbox
 creation and `config/setup-ssh.sh` installs it at launch.
+
+This is no longer purely optional: the skills repo is private, so **without a
+mounted key a sandbox cannot fast-forward its skill set** and runs on the
+image's baked floor instead.
+
+The key in `~/.ssh/sandbox` is currently registered as an **account-level SSH
+key** ("Checkfront - Sandboxes"), not a per-repo deploy key, so it already
+reaches `navcf/nav-skills` and every other repo on the account — nothing needs
+granting per repo. Note the trade-off that comes with it: an account key carries
+**write** access to everything you can push to, from inside a sandbox, whereas a
+deploy key would be scoped to one repo and can be read-only. A key cannot be
+both, so tightening this means a second dedicated keypair:
+
+```sh
+# Optional hardening: a read-only key scoped to the skills repo alone.
+ssh-keygen -t ed25519 -f ~/.ssh/sandbox-skills/id_ed25519 -N ''
+gh repo deploy-key add ~/.ssh/sandbox-skills/id_ed25519.pub -R navcf/nav-skills -t nav-skills
+```
+
+That needs `config/setup-ssh.sh` taught to install a second key and an
+`IdentityFile` entry for it, which it does not do today.
 
 One-time host setup — a **dedicated keypair used only by sandboxes**, never
 your personal key:
@@ -326,27 +355,126 @@ identical across majors — Postgres 18 emits named NOT NULL constraints where 1
 does not, for instance. Don't commit schema dumps generated in a sandbox.
 ## Skills
 
-Skills are managed with the [Vercel skills CLI](https://vercel.com/docs/agent-resources/skills).
-Each non-comment line in `skills.txt` is passed to
-`npx skills add <line> -a <agent> -y --copy` (`claude-code`, `codex`, or
-`cursor`), so any source format the CLI accepts works:
+Skills are **committed content in [`navcf/nav-skills`](https://github.com/navcf/nav-skills)**,
+not build output. Each image carries a checkout of that repo at
+`~/.local/share/nav-skills` as an offline floor; every agent launch
+fast-forwards it and materializes it into the agent's skills dir. So a skill
+change needs a push, not a rebuild — and it lands in a *running* Claude session
+without a restart.
 
-- `owner/repo` or full GitHub/GitLab/git URLs; pin with
-  `https://github.com/<owner>/<repo>/tree/<sha>`.
-- `-s <name>` selects skills from multi-skill repos (`-s '*'` for all).
-- Local paths — `./` and `../` resolve relative to this directory; `~` expands
-  to your home.
+**The repo is private**, which has two consequences:
 
-`npx skills find <query>` discovers new skills; later entries override earlier
-ones on name collision. Inside the sandbox the agent can also run
-`npx skills add` itself to install more.
+- **Fetching at launch needs the GitHub key** that `config/setup-ssh.sh`
+  provisions (the shims run it before the sync) plus
+  `sbx policy allow network "github.com:22"`. Both are already in place — the
+  mounted key is an account-level key, so it reaches this repo without a
+  per-repo grant; see "GitHub over SSH" for the privilege trade-off that
+  implies. Without a key the sync fails soft and the sandbox runs on the baked
+  floor: an older skill set, never an empty one.
+- **The build cannot clone it.** A credential must never end up in an image
+  layer, so `build.sh` passes a local checkout as a BuildKit named build context
+  (`--build-context nav-skills=../nav-skills`) and the Dockerfile copies it in
+  whole, `.git` included — so the result is a real clone whose `origin` is the
+  SSH remote, which is exactly what the launch-time fetch needs. The floor is
+  the checkout's committed `HEAD`; uncommitted skill edits are invisible to the
+  image.
+
+It stays private because most vendored skills are MIT upstream without the
+license text retained here, and one has no upstream license at all — see
+`VENDORING.md` in the skills repo.
+
+Why a clone plus a materialize step rather than cloning straight over the skills
+dir: Codex ships its own built-ins into `~/.codex/skills/.system`, so the skills
+dir is not exclusively ours. Materializing copies only the entries the repo
+tracks, so vendor content and anything an agent wrote are never touched. Git is
+the manifest — removals are computed by diffing the tracked entry list across
+the fast-forward, so no state file has to be kept in sync.
+
+### Managing them
+
+Inside a sandbox, via the `nav-skills` plugin (Claude) or the CLI (all agents):
+
+| | |
+|---|---|
+| `/nav-skills:sync` · `nav-skills sync` | fetch, fast-forward, materialize |
+| `/nav-skills:list` · `nav-skills list` | skills by category, with invocation mode |
+| `/nav-skills:new` · `nav-skills new <name> <mode>` | scaffold with correct per-agent frontmatter |
+| `/nav-skills:doctor` · `nav-skills doctor` | lint for discovery and consistency bugs |
+| `/nav-skills:harvest` · `nav-skills harvest` | package sandbox edits as a patch for review |
+
+`sync` is fast-forward-only and **refuses when the skills dir has diverged**, so
+it never discards work done in a sandbox — `harvest` packages it first. Harvest
+prepares a `git apply`-able patch and never commits or pushes: the clone is
+anonymous and read-only, so the sandbox holds no write credential.
+
+The `nav-skills/` plugin directory is a
+[skills-directory plugin](https://code.claude.com/docs/en/plugins-reference#skills-directory-plugins)
+— it auto-loads as `nav-skills@skills-dir` with no marketplace and no install
+step. It is materialized only into `~/.claude/skills`; Codex and cursor have no
+equivalent, and get the same verbs through the CLI.
+
+### The three agents are not equivalent
+
+| | Claude Code | Codex | cursor-agent (CLI) |
+|---|---|---|---|
+| Skills dir | `~/.claude/skills` | `~/.codex/skills` | `~/.cursor/skills` |
+| Vendor content to preserve | — | `.system/` | (its own live in `~/.cursor/skills-cursor/`) |
+| Honors `disable-model-invocation` | yes | **no** | yes |
+| Honors `user-invocable` | yes | no | no |
+| Picks up edits mid-session | **yes**, the dir is watched | auto-detects; restart if not | **no watcher** — start a new chat |
+| Loads the `nav-skills` plugin | yes | no | no |
+| Sync runs at launch from | `claude-shim.sh` | `codex-shim.sh` | `sessionStart` hook |
+
+Two consequences worth knowing rather than rediscovering:
+
+- **Codex ignores `disable-model-invocation`.** Its equivalent is
+  `agents/openai.yaml` → `policy.allow_implicit_invocation: false`. A skill meant
+  to be user-only is silently model-invocable on Codex unless both are set; the
+  skills repo sets them together and `nav-skills doctor` fails if they drift.
+- **cursor has no skills file watcher** — its catalog is fixed when a chat
+  starts. Sync at `sessionStart` means every *new* chat is current; a skill added
+  mid-chat needs a new chat, not a reload.
+
+cursor also gets its first launch hook here. Its launcher is an
+auto-update-managed symlink, so it has no shim; instead
+`config/cursor-session-start.sh` runs on `sessionStart`, syncing skills and
+returning `additional_context` — which doubles as the sandbox-guidance channel
+cursor otherwise lacks, having no global instructions file. That hook is merged
+into `~/.cursor/hooks.json` *after* `rtk init`, which owns `preToolUse` in the
+same file.
+
+### Invocation modes
+
+`metadata.invocation` in a skill's frontmatter is the source of truth, and is
+emitted per agent (see the [skills repo README](https://github.com/navcf/nav-skills)):
+
+| `metadata.invocation` | Claude / cursor | Codex `agents/openai.yaml` |
+|---|---|---|
+| `both` (default) | neither field | `allow_implicit_invocation: true` |
+| `user` | `disable-model-invocation: true` | `allow_implicit_invocation: false` |
+| `model` | `user-invocable: false` | *(no equivalent)* |
+
+### Adding a skill from upstream
+
+The [Vercel skills CLI](https://vercel.com/docs/agent-resources/skills) is kept
+only as an acquisition tool — it is no longer a build dependency:
+
+```sh
+npx skills find <query>                              # discover
+npx skills add <owner>/<repo> -s <name> -y --copy    # pull it in, then commit it
+```
+
+Move the skill directory into the `nav-skills` repo root, add its `metadata`
+block (the CLI's `skills-lock.json` supplies `source` and a content hash), and
+run `nav-skills doctor`. Skill discovery is one level deep in all three agents,
+so the repo is flat — grouping lives in `metadata.category`, not in directories.
 
 **Shared-skills shadowing**: unless a sandbox is created with
 `--no-share-skills`, sbx mounts its (host-side, initially empty) shared skills
 store over `~/.claude/skills`, `~/.agents/skills`, and `~/.cursor/skills`
-inside the container — hiding every skill baked at those paths. Always create
-sandboxes from these templates with `--no-share-skills`. (The codex image
-bakes to `~/.codex/skills`, which is not a mount target, but use the flag
+inside the container — hiding everything materialized at those paths. Always
+create sandboxes from these templates with `--no-share-skills`. (The codex image
+uses `~/.codex/skills`, which is not a mount target, but use the flag
 everywhere for consistency.)
 
 ## Stopping and resuming
@@ -411,8 +539,9 @@ calls (no review-of-review loops).
 ## How it works
 
 - Sandboxes do **not** sync host `~/.claude`; the claude image bakes
-  `~/.claude/skills`, `~/.claude/CLAUDE.md`, RTK hooks (`rtk init --global
-  --auto-patch`), and the gitnexus MCP registration in `~/.claude.json`.
+  `~/.claude/CLAUDE.md`, RTK hooks (`rtk init --global --auto-patch`), and the
+  gitnexus MCP registration in `~/.claude.json`. Skills are the exception —
+  they come from git at launch, not from the image (see "Skills").
 - sbx **re-seeds `~/.claude.json` at sandbox creation**, clobbering the baked
   MCP registration. The Dockerfile moves the native-install launcher symlink
   (`/home/agent/.local/bin/claude`) to `claude-real` and puts a shim in its
@@ -424,29 +553,30 @@ calls (no review-of-review loops).
   `codex-shim.sh` — at `/home/agent/.local/bin/codex`, which precedes the real
   npm-global binary on PATH, no `mv` needed — appends the gitnexus block via
   `config/gitnexus-mcp-codex.sh` (grep-guarded, never a rewrite) before
-  `exec`ing the real codex. Skills bake to `~/.codex/skills` (codex's global
-  skills dir, and not a shared-store mount target). Global instructions live
+  `exec`ing the real codex. Skills materialize into `~/.codex/skills` (codex's
+  global skills dir, and not a shared-store mount target), leaving codex's own
+  built-ins under `.system/` untouched. Global instructions live
   at `~/.codex/AGENTS.md`. RTK has no codex integration, so the binary ships
   hook-less with usage guidance in `AGENTS.md`.
 - The cursor image needs **no shim**: sbx's cursor manifest seeds only
   `~/.cursor/cli-config.json` (and only if missing) and never rewrites an MCP
   config, so the baked `~/.cursor/mcp.json` survives creation (verified).
   RTK hooks are wired via `rtk init --global --agent cursor`
-  (`~/.cursor/hooks.json`, `preToolUse` → `rtk hook cursor`). Skills bake to
-  `~/.cursor/skills` (needs `--no-share-skills`, see above). cursor-agent has
-  no global instructions file — it reads `AGENTS.md`/`CLAUDE.md` at the
-  project root only, so put sandbox guidance in the workspace if you want
-  cursor to see it. Auth is injected per-run as `CURSOR_AUTH_TOKEN` by sbx
+  (`~/.cursor/hooks.json`, `preToolUse` → `rtk hook cursor`), and a
+  `sessionStart` entry is merged into the same file afterwards to sync skills
+  into `~/.cursor/skills` (needs `--no-share-skills`, see above). cursor-agent
+  has no global instructions file — it reads `AGENTS.md`/`CLAUDE.md` at the
+  project root only — so that hook's `additional_context` carries the
+  sandbox guidance instead. Auth is injected per-run as `CURSOR_AUTH_TOKEN` by sbx
   (`AGENT_CLI_CREDENTIAL_STORE=memory`); sbx also pre-trusts the workspace so
   the TUI skips its trust prompt.
 - The workspace mounts at the same absolute path as on the host — never bake
   files under a workspace path (the mount would shadow them).
-- Nothing in the sandbox depends on this directory: `.local/` is gitignored
-  (absent in `sbx create --clone` sandboxes), but `skills-local/` and
-  `skills.txt` are only read at image build time on the host. Gitignored skills
-  you want inside the sandbox must go through the image bake, not the
-  workspace; committed project skills (`.ai/skills`) come with the workspace
-  in both modes.
+- Nothing in the sandbox depends on this directory. Skills come from the
+  `nav-skills` repo over HTTPS, so they need no host-side state at all;
+  project-specific skills belong in the workspace's own `.claude/skills`, which
+  Claude Code discovers natively (with live reload) in both bind-mount and
+  `--clone` modes.
 - gitnexus itself never runs in the sandbox; MCP traffic goes to the host via
   `http://host.docker.internal:4747/mcp`.
 
@@ -470,10 +600,37 @@ calls (no review-of-review loops).
 - **gitnexus missing from cursor's MCP servers**: re-assert manually with
   `node /usr/local/share/sbx/gitnexus-mcp-cursor.cjs` (and report it — sbx is
   not expected to touch `~/.cursor/mcp.json`).
-- **Baked skills missing inside a sandbox** (`ls ~/.claude/skills` or
+- **Skills missing inside a sandbox** (`ls ~/.claude/skills` or
   `~/.cursor/skills` is empty): the sandbox was created without
-  `--no-share-skills`, so sbx mounted its empty shared store over the baked
-  dir. Recreate the sandbox with the flag.
+  `--no-share-skills`, so sbx mounted its empty shared store over the
+  materialized dir. Recreate the sandbox with the flag. `nav-skills status`
+  shows the clone, the target, and whether they diverge.
+- **`warn: skills sync failed` / `fetch failed — using the baked snapshot`**: the
+  sandbox is running on the image's baked skill floor — an older set, not no set.
+  The skills repo is private, so the fetch needs both a mounted key with access
+  to it (see "GitHub over SSH") and
+  `sbx policy allow network "github.com:22"`. Check with
+  `ssh -T git@github.com` and `nav-skills status`, and `sbx policy log` for
+  blocked egress.
+- **`./build.sh` fails with `no nav-skills checkout at ...`**: the image bakes its
+  skill floor from a local checkout, since the private repo cannot be cloned at
+  build time. `git clone git@github.com:navcf/nav-skills.git ../nav-skills`, or
+  point `NAV_SKILLS_SRC` at an existing checkout.
+- **`nav-skills sync` refuses with "local edits"**: the skills dir has diverged
+  from the clone, which is the guard against silently discarding work done in
+  the sandbox. Run `nav-skills harvest` to package the changes as a patch, pull
+  it to the host with the `sbx cp` line it prints, then re-run sync.
+  `nav-skills sync --force` is the explicit discard.
+- **A skill edited in the sandbox keeps reverting**: it was edited in the
+  materialized copy under the agent's skills dir, which the next sync
+  overwrites. Edit the clone at `~/.local/share/nav-skills` instead.
+- **cursor doesn't see a new skill**: cursor-agent has no skills file watcher —
+  its catalog is fixed when a chat starts. Start a new chat. If a *new chat*
+  also misses it, the `sessionStart` hook may not have fired: check that
+  `~/.cursor/hooks.json` still contains both the rtk `preToolUse` entry and the
+  `sessionStart` one, re-assert with
+  `node /usr/local/share/sbx/cursor-hooks-merge.cjs`, and run
+  `nav-skills sync` by hand meanwhile.
 - **codex not signed in**: run `sbx secret set -g openai --oauth` on the host,
   then recreate the sandbox.
 - **cursor not signed in**: cursor OAuth cannot be started from
