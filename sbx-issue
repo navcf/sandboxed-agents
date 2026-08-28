@@ -2,12 +2,16 @@
 # Launch an agent sandbox preloaded with a GitHub issue or PR as context.
 #
 # Fetches the item with `gh` (title, body, labels, comments; diff stat for
-# PRs), writes it to <workspace>/.local/sbx-context/<issue|pr>-<id>.md, and
-# runs `sbx run --clone --name <agent>-<id>` from the current directory with
-# an initial prompt that points the agent at the context file. The workspace
-# mounts at the same absolute path inside the sandbox (read-only in --clone
-# mode), so the file is reachable either way; `.local/` is typically
-# gitignored, so the context file never dirties the workspace's git status.
+# PRs), writes it to <workspace>/.local/sbx-context/<issue|pr>-<id>.md, copies
+# that file into the sandbox at /tmp/sbx-context/, and attaches
+# `sbx run --name <agent>-<id>` with an initial prompt pointing the agent at
+# the in-sandbox copy. `.local/` is typically gitignored, so the host file
+# never dirties the workspace's git status.
+#
+# The copy is not redundant. In --clone mode sbx backs the workspace path with
+# a container-local volume holding the agent's private clone, so the host
+# workspace is not mounted anywhere in the sandbox and the host path does not
+# resolve there; `.local/` being gitignored keeps it out of the clone too.
 #
 # Usage: sbx-issue [--repo owner/name] [--no-clone] AGENT ISSUE_OR_PR [SBX_RUN_FLAGS...]
 set -eu
@@ -27,9 +31,11 @@ context.
                   origin, or the repo in the URL)
   --no-clone      work directly on the host working tree (default is --clone:
                   the agent gets a private clone; sync with sbx-git)
-  --prep-only     fetch context and create the sandbox, then print
-                  sandbox=/context= lines and exit instead of attaching the
-                  TUI — for headless drivers (`sbx exec NAME claude -p ...`)
+  --prep-only     fetch context, create the sandbox and seed the context into
+                  it, then print sandbox=/context=/sandbox_context= lines and
+                  exit instead of attaching the TUI — for headless drivers
+                  (`sbx exec NAME claude -p ...`). sandbox_context= is the path
+                  the agent reads; context= is the host copy.
   SBX_RUN_FLAGS   passed through to `sbx run` (e.g. -t IMAGE)
 
 defaults, applied at sandbox creation:
@@ -91,8 +97,13 @@ meta=$(gh api "repos/$repo/issues/$num" \
 kind=${meta%% *} title=${meta#* }
 
 workspace=$PWD
+sandbox=$agent-$num
 ctx_dir=$workspace/.local/sbx-context
 ctx_file=$ctx_dir/$kind-$num.md
+# Where the agent reads it from: the host path does not resolve inside the
+# sandbox (see the note at the top of this file), so the file is copied in.
+sbx_ctx_dir=/tmp/sbx-context
+sbx_ctx_file=$sbx_ctx_dir/$kind-$num.md
 mkdir -p "$ctx_dir"
 
 echo "==> fetching $kind #$num from $repo: $title"
@@ -130,13 +141,6 @@ else
 fi
 echo "==> context written to $ctx_file"
 
-# --prep-only with an existing sandbox: nothing to create, just report it.
-if [ -n "$prep_only" ] && sbx ls -q 2>/dev/null | grep -qx "$agent-$num"; then
-  echo "==> sandbox $agent-$num already exists; context refreshed"
-  printf 'sandbox=%s\ncontext=%s\nrepo=%s\nkind=%s\n' "$agent-$num" "$ctx_file" "$repo" "$kind"
-  exit 0
-fi
-
 # Issues: understand and propose, never implement unprompted. PRs: review and
 # report findings; the review itself proceeds, but the code stays untouched.
 case $kind in
@@ -155,46 +159,60 @@ Do NOT modify any code. Present your findings: (1) a short summary of what the P
 esac
 prompt="You are working on GitHub $kind_label #$num in $repo: \"$title\".
 
-The full $kind_label content (description, labels, comments$extras) is saved at:
-  $ctx_file
-(In clone mode that path is the read-only host mount, not your working clone.)
+The full $kind_label content (description, labels, comments$extras) is saved
+inside this sandbox at:
+  $sbx_ctx_file
 
 $task"
 
-# Repo-baked templates need --no-share-skills so the shared store does not
-# shadow the baked skills (see README); other agents use sbx's stock image.
-template=
-case $agent in
-  claude) template=docker.io/navcf/sandbox-templates:claude-code ;;
-  codex)  template=docker.io/navcf/sandbox-templates:codex ;;
-  cursor) template=docker.io/navcf/sandbox-templates:cursor-agent ;;
-esac
-for arg in "$@"; do
-  case $arg in
-    -t|--template|--template=*) template= ;;  # user override wins
-    --clone) clone= ;;                        # already passed, don't duplicate
+# Creation always goes through `sbx create` and the initial prompt is
+# delivered by the separate `sbx run --name` attach at the bottom: the context
+# has to be copied in between those two steps, and a re-attach cannot be handed
+# the agent/workspace positionals again ("can't be given new workspaces").
+if sbx ls -q 2>/dev/null | grep -qx "$sandbox"; then
+  echo "==> sandbox $sandbox already exists; creation flags ignored"
+else
+  # Repo-baked templates need --no-share-skills so the shared store does not
+  # shadow the baked skills (see README); other agents use sbx's stock image.
+  template=
+  case $agent in
+    claude) template=docker.io/navcf/sandbox-templates:claude-code ;;
+    codex)  template=docker.io/navcf/sandbox-templates:codex ;;
+    cursor) template=docker.io/navcf/sandbox-templates:cursor-agent ;;
   esac
-done
+  for arg in "$@"; do
+    case $arg in
+      -t|--template|--template=*) template= ;;  # user override wins
+      --clone) clone= ;;                        # already passed, don't duplicate
+    esac
+  done
 
-# Default extra mounts (positional, after the workspace; extra workspaces
-# mount at their host-absolute path). Each is skipped silently when absent:
-# the Notes dir the baked instructions write plans to, and the dedicated
-# GitHub SSH key dir consumed by setup-ssh.sh (read-only).
-notes=${SBX_ISSUE_NOTES_DIR-/Users/nav/Documents/Notes}
-set -- "$@" "$agent" "$workspace"
-[ -n "$notes" ] && [ -d "$notes" ] && set -- "$@" "$notes"
-[ -d "$HOME/.ssh/sandbox" ] && set -- "$@" "$HOME/.ssh/sandbox:ro"
-[ -n "$prep_only" ] || set -- "$@" -- "$prompt"
-[ -z "$template" ] || set -- --no-share-skills -t "$template" "$@"
-[ -z "$clone" ] || set -- --clone "$@"
-if [ -n "$prep_only" ]; then
-  # Create without attaching; the caller drives the agent headlessly.
-  set -- create --name "$agent-$num" "$@"
+  # Default extra mounts (positional, after the workspace; extra workspaces
+  # mount at their host-absolute path). Each is skipped silently when absent:
+  # the Notes dir the baked instructions write plans to, and the dedicated
+  # GitHub SSH key dir consumed by setup-ssh.sh (read-only).
+  notes=${SBX_ISSUE_NOTES_DIR-/Users/nav/Documents/Notes}
+  set -- "$@" "$agent" "$workspace"
+  [ -n "$notes" ] && [ -d "$notes" ] && set -- "$@" "$notes"
+  [ -d "$HOME/.ssh/sandbox" ] && set -- "$@" "$HOME/.ssh/sandbox:ro"
+  [ -z "$template" ] || set -- --no-share-skills -t "$template" "$@"
+  [ -z "$clone" ] || set -- --clone "$@"
+  set -- create --name "$sandbox" "$@"
   echo "==> sbx $*" | head -c 300; echo
   sbx "$@"
-  printf 'sandbox=%s\ncontext=%s\nrepo=%s\nkind=%s\n' "$agent-$num" "$ctx_file" "$repo" "$kind"
+fi
+
+# `sbx cp` does not create parent directories, hence the mkdir; both it and
+# `sbx exec` wake a stopped sandbox on their own.
+sbx exec "$sandbox" -- mkdir -p "$sbx_ctx_dir" >/dev/null
+sbx cp "$ctx_file" "$sandbox:$sbx_ctx_file" >/dev/null
+echo "==> context copied into $sandbox at $sbx_ctx_file"
+
+if [ -n "$prep_only" ]; then
+  # Created and seeded without attaching; the caller drives the agent headlessly.
+  printf 'sandbox=%s\ncontext=%s\nsandbox_context=%s\nrepo=%s\nkind=%s\n' \
+    "$sandbox" "$ctx_file" "$sbx_ctx_file" "$repo" "$kind"
   exit 0
 fi
-set -- run --name "$agent-$num" "$@"
-echo "==> sbx $*" | head -c 300; echo
-exec sbx "$@"
+echo "==> sbx run --name $sandbox"
+exec sbx run --name "$sandbox" -- "$prompt"
