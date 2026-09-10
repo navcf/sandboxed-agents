@@ -39,11 +39,22 @@ for agent in $AGENTS; do
   esac
   image=${IMAGE:-docker.io/navcf/sandbox-templates:$tag}
 
+  # Force claude's native-installer RUN / codex's npm RUN to actually
+  # re-execute every build: their command text never changes, so without a
+  # fresh value here they're a permanent cache hit and never pick up a newer
+  # release. See Dockerfile's CLAUDE_CACHE_BUST / CODEX_CACHE_BUST.
+  cachebust_args=
+  case $agent in
+    claude) cachebust_args="--build-arg CLAUDE_CACHE_BUST=$(date +%s)" ;;
+    codex)  cachebust_args="--build-arg CODEX_CACHE_BUST=$(date +%s)" ;;
+  esac
+
   # One Dockerfile, one target per agent. The shared `artifacts` stage builds
   # on the first agent and is a cache hit for the rest.
   docker build --target "$agent" \
     --build-arg "BASE_IMAGE=docker/sandbox-templates:$tag" \
     --build-context "nav-skills=$SKILLS_SRC" \
+    $cachebust_args \
     -t "$image" .
   docker push "$image"
 

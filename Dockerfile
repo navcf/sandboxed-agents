@@ -115,6 +115,20 @@ RUN NAV_SKILLS_HOME=/home/agent/.local/share/nav-skills \
     nav-skills materialize \
  && chown -R agent:agent /home/agent/.claude /home/agent/.local/share/nav-skills
 
+# Upgrade claude past whatever version the base image baked, via the same
+# native installer the base image itself used. Writes a new
+# ~/.local/share/claude/versions/<x> and re-points the ~/.local/bin/claude
+# symlink at it, so the mv/shim below still finds it at the expected path.
+# CLAUDE_CACHE_BUST (build.sh passes a fresh timestamp every build) is
+# referenced in the RUN below so this layer — pure cache-hit forever
+# otherwise, since the command text never changes even though the remote
+# installer's output does — actually re-runs and picks up new releases.
+ARG CLAUDE_CACHE_BUST=0
+USER agent
+ENV HOME=/home/agent
+RUN echo "cache-bust=${CLAUDE_CACHE_BUST}" && curl -fsSL https://claude.ai/install.sh | bash
+USER root
+
 # sbx re-seeds ~/.claude.json at sandbox creation, clobbering anything baked at
 # build time. Claude is a native install whose launcher symlink lives at
 # /home/agent/.local/bin/claude — move it aside and put a shim in its place that
@@ -186,6 +200,15 @@ COPY --chown=agent:agent --chmod=755 codex-shim.sh /home/agent/.local/bin/codex
 USER agent
 # Classic builder does not derive HOME from USER; the script below needs it.
 ENV HOME=/home/agent
+
+# Upgrade codex past whatever version the base image baked — same npm-global
+# prefix the base image installed into (already on PATH), so the symlink at
+# /usr/local/share/npm-global/bin/codex that the shim execs stays valid.
+# CODEX_CACHE_BUST (build.sh passes a fresh timestamp every build) is
+# referenced in the RUN below for the same reason as CLAUDE_CACHE_BUST above:
+# otherwise this layer is a permanent cache hit and never re-checks npm.
+ARG CODEX_CACHE_BUST=0
+RUN echo "cache-bust=${CODEX_CACHE_BUST}" && npm install -g @openai/codex@latest
 
 # rtk has no codex integration (`rtk init` only targets Claude Code) — the
 # binary ships with prose guidance in AGENTS.md; no hooks.
