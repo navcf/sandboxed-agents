@@ -2,33 +2,26 @@
 
 There is no Docker daemon in the sandbox (`/var/run/docker.sock` does not
 exist), by design. Everything a dev stack needs is already native in the
-image: PostgreSQL 18 on localhost:5432 (managed by `devstack`), Node, the
-headless browser, xvfb.
+image: PostgreSQL 17 on localhost:5432 (already running and migrated — see
+docs/database.md), Node, the headless browser, xvfb.
 
-When project tooling shells out to Docker, route around it:
+`docker-compose.yml`, `postgres/Dockerfile`, and anything invoking `docker` or
+`docker compose` directly do not work here — route around them:
 
 - A CLI that runs `docker compose up` for a database is almost always a
-  fallback after probing for a local server — make sure Postgres is running
-  (`devstack up`) so the probe succeeds, and point its connection at
-  localhost:5432.
-- When that probe checks a port devstack does not serve — a test config
-  pinning e.g. `DATABASE_PORT=5433` — an inline env override usually loses,
-  because the runner loads its own env file (Nx, dotenv-cli and friends read
-  `.env.test` themselves) after your override. Forward the port rather than
-  fight the config, and create the test database first if the config names a
-  separate one:
-
-      PGPASSWORD=postgres psql -U postgres -h localhost -p 5432 \
-        -c "CREATE DATABASE <test-db>"
-      socat TCP-LISTEN:5433,fork,reuseaddr TCP:127.0.0.1:5432
-
-  A suite behind such a probe is NOT the no-native-path case below; it runs
-  fully natively once the probe is satisfied. Record the recipe for the
-  workspace in `TEST_HINT` (`.local/.devstack.conf`) so the next session does
-  not rediscover it.
+  fallback after probing for a local server — Postgres is already running on
+  localhost:5432, so the probe succeeds on its own; point any explicit
+  connection config at localhost:5432 if it isn't already.
+- When a probe checks a port Postgres isn't actually listening on (a test
+  config pinning e.g. `DATABASE_PORT=5433`) — `manifest dev set <port>` (see
+  `pnpm manifest dev show`) is the project's own mechanism for this; prefer it
+  over an inline env override, since the runner often loads its own env file
+  (Nx, dotenv-cli and friends read `.env.test` themselves) after your
+  override anyway.
 - A migrate/codegen tail that calls `docker exec … pg_dump` after migrations
-  already applied: absorb it with `TOLERATE_MIGRATE_FAIL_IF` in
-  `.local/.devstack.conf` — do not hand-roll a replacement for the step.
+  already applied, or any other manifest CLI step with no native path: report
+  the gap to the user rather than hand-rolling a workaround — it's a fix that
+  belongs in the project's own tooling.
 - A test helper that hard-requires `docker compose` with no native path:
   report the gap to the user rather than working around it — the durable fix
   is in the project's tooling (probe localhost:5432 first, use Docker only

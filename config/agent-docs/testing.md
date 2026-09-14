@@ -1,8 +1,9 @@
 # Tests, screenshots, recordings
 
-Unit/integration tests: use the project's own scripts (`pnpm test`, or the
-`TEST_HINT` printed by `devstack up`). Run `devstack up` first — test suites
-assume a migrated, seeded database.
+Use `pnpm manifest test [unit|api|e2e]` — it handles env setup, isolated test
+schemas/servers, and cleanup itself (see docs/database.md). Postgres is
+already running and migrated by the time the agent starts; `pnpm manifest db
+status` if a test suite complains otherwise.
 
 E2E / browser work runs HEADLESS ONLY:
 

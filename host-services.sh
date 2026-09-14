@@ -1,10 +1,10 @@
 #!/usr/bin/env sh
-# Host-side services for the sandboxes, in one self-contained script:
-#   - gitnexus MCP HTTP server        127.0.0.1:${GITNEXUS_MCP_PORT:-4747}
-#   - agent-bridge MCP HTTP server    127.0.0.1:${AGENT_BRIDGE_PORT:-4748}
+# Host-side agent-bridge MCP HTTP server: 127.0.0.1:${AGENT_BRIDGE_PORT:-4748}.
 #
-# Sandboxes reach both via host.docker.internal; requires the one-time
-#   sbx policy allow network "localhost:4747"
+# gitnexus runs separately, as a docker-compose service in
+# ~/Projects/expedition (`docker compose --profile gitnexus up -d gitnexus`);
+# this script no longer starts it. Sandboxes reach the bridge via
+# host.docker.internal; requires the one-time
 #   sbx policy allow network "localhost:4748"
 #
 # The agent-bridge lets one sandboxed agent ask another for help (e.g. a code
@@ -15,24 +15,17 @@
 # Long peer runs (30-60 min adversarial reviews) use an async job pattern:
 # ask_agent starts the peer immediately and blocks only a short wait window
 # (default 50s — safely under every MCP client's tool timeout, incl. codex's
-# 60s default and cursor's unconfigurable one). If the peer finishes in the
-# window the answer is returned directly; otherwise ask_agent returns a job id
-# and the caller long-polls get_agent_response until done. The peer keeps
-# running on the host regardless of any client-side timeout or dropped
-# connection, and finished results are retained for 6h for re-fetch.
+# 60s default). If the peer finishes in the window the answer is returned
+# directly; otherwise ask_agent returns a job id and the caller long-polls
+# get_agent_response until done. The peer keeps running on the host
+# regardless of any client-side timeout or dropped connection, and finished
+# results are retained for 6h for re-fetch.
 #
-# Ctrl-C stops both servers; if either exits, the other is stopped too so a
-# half-running state never lingers.
+# Ctrl-C stops the server.
 set -eu
 cd "$(dirname "$0")"
 
-export GITNEXUS_MCP_PORT="${GITNEXUS_MCP_PORT:-4747}"
 export AGENT_BRIDGE_PORT="${AGENT_BRIDGE_PORT:-4748}"
-
-# Loopback bind — no auth token required. If sandboxes cannot reach it,
-# retry with: --host 0.0.0.0 --auth-token <token>
-npx -y gitnexus mcp --http -p "$GITNEXUS_MCP_PORT" &
-gitnexus=$!
 
 # Stateless streamable-HTTP JSON-RPC, dependency-free (node built-ins only).
 node --input-type=module - <<'BRIDGE_EOF' &
@@ -44,14 +37,10 @@ const PORT = Number(process.env.AGENT_BRIDGE_PORT || 4748);
 
 // Headless invocations. The prompt is piped via stdin for claude (argv-free)
 // and passed as a verbatim argv element otherwise — sbx exec does not go
-// through a shell, so no quoting issues. All three CLIs take a model flag.
+// through a shell, so no quoting issues. Both CLIs take a model flag.
 const AGENTS = {
   claude: (prompt, model) => ({ argv: ['claude', '--dangerously-skip-permissions', ...(model ? ['--model', model] : []), '-p'], stdin: prompt }),
   codex:  (prompt, model) => ({ argv: ['codex', 'exec', '--skip-git-repo-check', ...(model ? ['--model', model] : []), prompt] }),
-  // --force: headless cursor-agent otherwise REJECTS every shell command it
-  // wants to run (the interactive TUI gets --yolo from sbx; -p mode doesn't),
-  // which surfaces as "no git/github access" during reviews.
-  cursor: (prompt, model) => ({ argv: ['cursor-agent', '-p', prompt, '--output-format', 'text', '--force', ...(model ? ['--model', model] : [])] }),
 };
 
 const DEFAULT_WAIT_S = 50;              // per-call block window: under every MCP client's tool-timeout floor
@@ -62,7 +51,7 @@ const TOOLS = [
   {
     name: 'ask_agent',
     description:
-      'Ask another sandboxed coding agent (claude, codex, or cursor) to perform a task — ' +
+      'Ask another sandboxed coding agent (claude or codex) to perform a task — ' +
       'typically reviewing work in the shared workspace. The peer runs headlessly in its own ' +
       'sandbox on the same workspace files, so reference files/diffs by path in the prompt. ' +
       'Starts the peer immediately and waits up to wait_seconds (default 50) for it to finish: ' +
@@ -73,11 +62,11 @@ const TOOLS = [
     inputSchema: {
       type: 'object',
       properties: {
-        agent: { type: 'string', enum: ['claude', 'codex', 'cursor'], description: 'Which agent to ask.' },
+        agent: { type: 'string', enum: ['claude', 'codex'], description: 'Which agent to ask.' },
         prompt: { type: 'string', description: 'The full task, self-contained: what to do, which files/commits/diffs to look at, and what to return.' },
         workdir: { type: 'string', description: 'Absolute path of the shared workspace (your workspace root). Used to find the peer\'s sandbox.' },
         sandbox: { type: 'string', description: 'Optional explicit sandbox name; overrides workdir-based lookup.' },
-        model: { type: 'string', description: 'Optional model for the peer, in that agent\'s own naming (e.g. cursor: "gpt-5.3-codex-high", "composer-2.5", see `cursor-agent models`; claude: "opus", "sonnet"; codex: "gpt-5-codex"). Omit for the agent\'s default.' },
+        model: { type: 'string', description: 'Optional model for the peer, in that agent\'s own naming (e.g. claude: "opus", "sonnet"; codex: "gpt-5-codex"). Omit for the agent\'s default.' },
         wait_seconds: { type: 'number', description: 'How long this call blocks waiting for the peer before returning a job id (default 50). Keep it under your own MCP client tool timeout.' },
         timeout_seconds: { type: 'number', description: 'Max total seconds the peer may run before it is killed (default and max 3600, i.e. 1h). Not how long this call blocks — that is wait_seconds.' },
       },
@@ -126,7 +115,7 @@ async function resolveSandbox(agent, workdir) {
   if (rows.some((r) => r[0] === guess)) return guess;
   const have = rows.map((r) => `${r[0]} (${r[1]}: ${r[4] || '?'})`).join('; ') || 'none';
   throw new Error(`no ${agent} sandbox found for workspace ${workdir}. Existing sandboxes: ${have}. ` +
-    `Create one with: sbx run --no-share-skills -t docker.io/navcf/sandbox-templates:<tag> ${agent} (from the workspace dir), or pass sandbox explicitly.`);
+    `Create one with: sbx run -t docker.io/navcf/sandbox-templates:<tag> ${agent} (from the workspace dir), or pass sandbox explicitly.`);
 }
 
 // ---- async job registry -------------------------------------------------
@@ -198,7 +187,7 @@ function jobReply(job) {
 }
 
 async function askAgent(args) {
-  if (!AGENTS[args.agent]) throw new Error(`unknown agent ${args.agent}; use claude, codex, or cursor`);
+  if (!AGENTS[args.agent]) throw new Error(`unknown agent ${args.agent}; use claude or codex`);
   const job = startJob(args);
   await waitJob(job, clampWaitS(args.wait_seconds) * 1000);
   return jobReply(job);
@@ -286,8 +275,6 @@ http
 BRIDGE_EOF
 bridge=$!
 
-trap 'kill "$gitnexus" "$bridge" 2>/dev/null || true' INT TERM EXIT
+trap 'kill "$bridge" 2>/dev/null || true' INT TERM EXIT
 
-while kill -0 "$gitnexus" 2>/dev/null && kill -0 "$bridge" 2>/dev/null; do
-  sleep 1
-done
+wait "$bridge"

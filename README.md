@@ -1,55 +1,39 @@
-# Claude Code + Codex + Cursor sandbox templates
+# Claude Code + Codex sandbox templates
 
-Custom [Docker Sandboxes](https://docs.docker.com/ai/sandboxes/) templates with
-RTK and the gitnexus MCP server (host-connected) baked in, and skills
-delivered from git rather than baked: they are committed content in
-[`navcf/nav-skills`](https://github.com/navcf/nav-skills), baked into the image
-as an offline floor and fast-forwarded at every agent launch, so changing a
-skill needs a push rather than a rebuild. No kits; config is fully in place
-before the agent launches. Point multiple agents at the same workspace to have them
-review each other's work: the workspace is the same bind-mount in every
-sandbox, and the default sandbox names (`claude-<workdir>`, `codex-<workdir>`,
-`cursor-<workdir>`) never collide.
+Custom [Docker Sandboxes](https://docs.docker.com/ai/sandboxes/) templates,
+targeting `~/Projects/expedition` specifically, with the gitnexus MCP server
+(host-connected) baked in and PostgreSQL 17 (pg_cron, extensions, schema —
+matching the project's own `postgres/Dockerfile`/`postgres/init-db.sql`)
+started and migrated before any agent CLI launches. No kits; config is fully
+in place before the agent launches. Point both agents at the same workspace
+to have them review each other's work: the workspace is the same bind-mount
+in every sandbox, and the default sandbox names (`claude-<workdir>`,
+`codex-<workdir>`) never collide.
 
 ## Layout
 
 | Path | Purpose |
 |---|---|
-| `Dockerfile` | All three template images on top of `docker/sandbox-templates:{claude-code,codex,cursor-agent}` — one target per agent (`claude`/`codex`/`cursor`), sharing an `artifacts` stage (rtk, Node, TS toolchain, Playwright browsers) that downloads once and `COPY --link`s into each image as identical blobs |
-| `config/nav-skills` | Baked to `/usr/local/bin/nav-skills`: fast-forwards the [`navcf/nav-skills`](https://github.com/navcf/nav-skills) clone and materializes it into the agent's skills dir; also `materialize`/`status`/`list`/`new`/`doctor`/`harvest` |
+| `Dockerfile` | Both template images on top of `docker/sandbox-templates:{claude-code,codex}` — one target per agent (`claude`/`codex`), sharing an `artifacts` stage (Node, TS toolchain, Playwright browsers) that downloads once and `COPY --link`s into each image as identical blobs |
 | `config/CLAUDE.md` | Baked global Claude instructions — short, universal rules only; task detail lives in `config/agent-docs/` |
-| `config/AGENTS.md` | Baked global Codex instructions (same content, hook-less RTK) |
-| `config/agent-docs/` | Baked to `/usr/local/share/sbx/docs/`: progressive-disclosure companions the instruction files point at (devstack details, Docker route-arounds, testing/screenshots) |
+| `config/AGENTS.md` | Baked global Codex instructions (same content) |
+| `config/agent-docs/` | Baked to `/usr/local/share/sbx/docs/`: progressive-disclosure companions the instruction files point at (database, Docker route-arounds, testing/screenshots) |
 | `config/gitnexus-mcp.cjs` | Merges the host MCP entries (gitnexus + agent-bridge) into `~/.claude.json` |
-| `config/gitnexus-mcp-codex.sh` | Grep-guard-appends the host MCP entries to `~/.codex/config.toml` |
-| `config/gitnexus-mcp-cursor.cjs` | Merges the host MCP entries into `~/.cursor/mcp.json` |
-| `config/devstack-install.sh` | Per-agent dev stack install: Postgres 18 + pg_cron, xvfb, Chromium headless-shell deps, plus PATH wiring for the shared artifacts |
-| `config/devstack-node.sh` | Artifacts-stage download: official Node build + global pnpm/TypeScript/tsx + a `playwright` CLI pinned to the baked browsers (`/opt/node`, `/opt/node-tools`) |
-| `config/install-browsers.sh` | Artifacts-stage Playwright browser download to `/opt/ms-playwright` (works around the missing arm64 build) |
-| `config/devstack` | Baked to `/usr/local/bin/devstack`; project-agnostic lifecycle (start pg, `.env` bootstrap, migrate, seed), configured per workspace via `.local/.devstack.conf` |
-| `config/fix-tz.sh` | Sourced by the shims and `devstack`: replaces a non-IANA inherited `TZ` (macOS "PDT7") with UTC |
-| `config/setup-ssh.sh` | Run by the shims at every launch: copies a host-mounted GitHub deploy key into `~/.ssh` (0600, agent-owned) and writes `~/.ssh/config` + `known_hosts`; silent no-op when no key is mounted — see "GitHub over SSH" |
+| `config/build-install.sh` | Build-time install, run from the Dockerfile: `artifacts` (Node, TS toolchain, Playwright browsers) and `postgres` (PostgreSQL 17 + pg_cron built from source, xvfb, Chromium libs) |
+| `config/agent.sh` | Baked to `/usr/local/bin/sbx-agent` — every runtime step as one subcommand: `container-init` (the image `ENTRYPOINT`), `launch <claude\|codex>` (what the shims delegate to), plus `setup-ssh`/`codex-settings`/`gitnexus-codex` |
 | `config/github-known-hosts` | GitHub's published SSH host keys (from `api.github.com/meta`), baked so the first git-over-SSH operation never hangs on a host-key prompt |
-| `config/cursor-session-start.sh` | cursor's `sessionStart` hook — the shim it never had: syncs skills and injects the sandbox guidance cursor has no global instructions file to hold |
-| `config/cursor-hooks-merge.cjs` | Merges that hook into `~/.cursor/hooks.json` after `rtk init`, which owns `preToolUse` in the same file |
-| `claude-shim.sh` | Baked to `/home/agent/.local/bin/claude` (real launcher moved to `claude-real`); re-asserts config sbx clobbers, fixes TZ, syncs skills, runs `devstack up`, then `exec`s the real claude |
-| `codex-shim.sh` | Baked to `/home/agent/.local/bin/codex` (shadows the npm-global binary via PATH order); same re-assert/TZ/skills/devstack-then-`exec` pattern |
+| `claude-shim.sh` | Baked to `/home/agent/.local/bin/claude` (real launcher moved to `claude-real`); delegates to `sbx-agent launch claude` |
+| `codex-shim.sh` | Baked to `/home/agent/.local/bin/codex` (shadows the npm-global binary via PATH order); delegates to `sbx-agent launch codex` |
 | `build.sh` | `docker build` → `docker push`, per agent or all |
-| `host-services.sh` | Self-contained host-side MCP servers: gitnexus on :4747 + agent-bridge on :4748 (lets agents ask each other for reviews); stops both together |
-| `sbx-git.sh` | Host-side sync for `--clone` sandboxes: `ls`/`pull`/`push`/`harvest` — fetch agent branches into worktrees, fan host commits into a sandbox's clone — see "Clone mode: syncing work" |
+| `host-services.sh` | Self-contained host-side agent-bridge MCP server on :4748 (lets agents ask each other for reviews) |
+| `sbx-agents` | Host-side CLI, hardcoded to `~/Projects/expedition`: `issue` (launch/re-attach with a GitHub issue/PR preloaded), `ls`/`pull`/`push`/`harvest`/`clean` (sync `--clone` sandbox branches into worktrees), `rm` (destroy a sandbox + its worktree/branch) — see "Clone mode: syncing work" |
 
 ## Workflow
 
 ```sh
-# One-time: the skills repo must be checked out beside this one, since the
-# image bakes its skill-set floor from a local checkout (it is private, so the
-# build cannot clone it — a credential must never land in a layer).
-git clone git@github.com:navcf/nav-skills.git ../nav-skills
-
-./build.sh          # build and push all images (or ./build.sh claude|codex|cursor)
-                    # NAV_SKILLS_SRC=<path> overrides the checkout location
-./host-services.sh  # on the host, in a separate terminal — gitnexus MCP on :4747
-                    # + agent-to-agent bridge on :4748
+./build.sh          # build and push all images (or ./build.sh claude|codex)
+./host-services.sh  # on the host, in a separate terminal — agent-to-agent bridge on :4748
+(cd ~/Projects/expedition && docker compose --profile gitnexus up -d gitnexus)  # gitnexus MCP on :4747
 
 # One-time: the sandbox proxy translates host.docker.internal to the host's
 # localhost and default-denies it — allow the two host MCP ports:
@@ -77,22 +61,15 @@ sbx policy allow network "js.stripe.com,api.stripe.com,m.stripe.network,r.stripe
 # One-time per service: agent logins. Credentials are proxy-managed by sbx;
 # nothing is baked into the images. (anthropic is likely already set up.)
 sbx secret set -g openai --oauth   # ChatGPT login for codex
-# Cursor OAuth cannot be started from `sbx secret set` — sign in from INSIDE
-# the first cursor sandbox (run `sbx run ... cursor`, then complete the
-# sign-in it prompts for; or run an API key in with `sbx secret set -g cursor`).
-# The proxy captures the login and reuses it for every later cursor sandbox.
 
-# First run creates the sandbox (from the workspace dir; flags only matter at
-# creation). --no-share-skills is REQUIRED for baked skills to be visible —
-# see "How it works". Thereafter a bare `sbx run claude` / `sbx run codex` /
-# `sbx run cursor` re-attaches via the default sandbox name (<agent>-<workdir>).
-# `-e TZ=UTC`: the claude/codex shims and devstack replace a non-IANA inherited
-# TZ with UTC on their own, but cursor's launcher is not shimmed — keep the
-# flag, especially for cursor. See "Dev stack" below.
-cd /path/to/workspace
-sbx create --clone --no-share-skills --name claude-<issue-id> -e TZ=UTC -t docker.io/navcf/sandbox-templates:claude-code claude . [dir-to-mount]
-sbx create --clone --no-share-skills --name claude-<issue-id> -e TZ=UTC -t docker.io/navcf/sandbox-templates:codex codex . [dir-to-mount]
-sbx create --clone --no-share-skills --name claude-<issue-id> -e TZ=UTC -t docker.io/navcf/sandbox-templates:cursor-agent cursor . [dir-to-mount]
+# First run creates the sandbox (from ~/Projects/expedition; flags only
+# matter at creation). Thereafter a bare `sbx run claude` / `sbx run codex`
+# re-attaches via the default sandbox name (<agent>-<workdir>).
+# `-e TZ=UTC`: `sbx-agent` replaces a non-IANA inherited TZ with UTC on its
+# own, but keep the flag for belt-and-suspenders. See "Dev stack" below.
+cd ~/Projects/expedition
+sbx create --clone --name claude-<issue-id> -e TZ=UTC -t docker.io/navcf/sandbox-templates:claude-code claude .
+sbx create --clone --name claude-<issue-id> -e TZ=UTC -t docker.io/navcf/sandbox-templates:codex codex .
 
 ```
 
@@ -109,8 +86,7 @@ working tree. sbx already provides the plumbing in both directions:
   alternates). The claude/codex shims register it as the `host` remote in the
   clone — the agent pulls your commits, including ones made after the sandbox
   was created, with `git fetch host` (and the shims drop the useless
-  `sandbox-*` remotes the clone copies from your host config). cursor has no
-  shim — one-liner inside the sandbox: `git remote add host /run/sandbox/source`.
+  `sandbox-*` remotes the clone copies from your host config).
 - **Sandbox → host**: each running clone sandbox serves a git daemon on a
   published loopback port, and sbx maintains a `sandbox-<name>` remote in your
   repo pointing at it (removed on stop, re-added by `sbx run`). The daemon has
@@ -118,46 +94,49 @@ working tree. sbx already provides the plumbing in both directions:
   **commits** cross in either direction; the baked instructions tell agents to
   work on a branch and commit early.
 
-`sbx-git.sh` wraps that into four verbs. Put it on your PATH (e.g.
-`ln -s "$PWD/sbx-git.sh" ~/.local/bin/sbx-git`) and run it from the workspace:
+`sbx-agents` wraps that into five verbs. It's hardcoded to
+`~/Projects/expedition` (`Checkfront/expedition` on GitHub) — the only repo
+it knows about — so it works from any directory, no `--repo` flag or `cd`
+needed. Put it on your PATH: `ln -s "$PWD/sbx-agents" ~/.local/bin/sbx-agents`.
 
 ```sh
-sbx-git ls                    # every sandbox's branches + how far ahead of your HEAD
-sbx-git pull claude-1234      # fetch + check the agent's branch out in a worktree at
-                              #   ../<repo>-wt/claude-1234-<branch> (local branch
-                              #   sbx/claude-1234/<branch>) — inspect and run tests
-                              #   there without touching your working tree
-sbx-git push claude-1234 main # the sandbox's clone learns your main (a `git fetch
-                              #   host main` inside); the agent still has to
-                              #   `git rebase host/main`
-sbx-git harvest claude-1234   # stopped sandbox: wake it, fetch everything, stop it
-                              #   again — no need to bring the TUI up just to fetch
-sbx-git clean claude-1234     # undo pull: remove the worktree + sbx/... branch
-                              #   (--force for dirty/unmerged; after sbx rm it also
-                              #   prunes the fetch refs and stale remote)
+sbx-agents ls                    # every sandbox's branches + how far ahead of your HEAD
+sbx-agents pull claude-1234      # fetch + check the agent's branch out in a worktree at
+                                 #   ../<repo>-wt/claude-1234-<branch> (local branch
+                                 #   sbx/claude-1234/<branch>) — inspect and run tests
+                                 #   there without touching your working tree
+sbx-agents push claude-1234 main # the sandbox's clone learns your main (a `git fetch
+                                 #   host main` inside); the agent still has to
+                                 #   `git rebase host/main`
+sbx-agents harvest claude-1234   # stopped sandbox: wake it, fetch everything, stop it
+                                 #   again — no need to bring the TUI up just to fetch
+sbx-agents clean claude-1234     # undo pull: remove the worktree + sbx/... branch
+                                 #   (--force for dirty/unmerged; after sbx rm it also
+                                 #   prunes the fetch refs and stale remote)
+sbx-agents rm claude-1234        # completely done with it: `sbx rm` + `clean` in one
+                                 #   step (--force for a dirty worktree/unmerged branch)
 ```
 
 A typical session:
 
 ```sh
-sbx-issue claude 1234                # agent works the issue in its own clone
-sbx-git ls                           # claude-1234: fix/payments … [3 ahead of HEAD]
-sbx-git pull claude-1234             # → ../expedition-wt/claude-1234-fix-payments
+sbx-agents issue claude 1234         # agent works the issue in its own clone
+sbx-agents ls                        # claude-1234: fix/payments … [3 ahead of HEAD]
+sbx-agents pull claude-1234          # → ../expedition-wt/claude-1234-fix-payments
 (cd ../expedition-wt/claude-1234-fix-payments && pnpm test)
 git commit …                         # meanwhile you commit on main
-sbx-git push claude-1234 main        # then ask the agent to rebase onto host/main
+sbx-agents push claude-1234 main     # then ask the agent to rebase onto host/main
 # happy with it: merge sbx/claude-1234/fix-payments as usual, then
-sbx rm claude-1234
-sbx-git clean claude-1234            # drop the worktree, local branch, fetch refs
+sbx-agents rm claude-1234            # destroy the sandbox + drop the worktree/branch
 ```
 
 Worth knowing:
 
-- `sbx-git pull`/`push` can omit the sandbox name when this repo has exactly
-  one; `pull` defaults to the branch the sandbox has checked out.
+- `pull`/`push` can omit the sandbox name when this repo has exactly one;
+  `pull` defaults to the branch the sandbox has checked out.
 - A sandbox woken by `sbx exec` republishes its daemon port but sbx does
-  **not** re-add the git remote — `sbx-git` reads the port from `sbx ls` in
-  that case, which is what makes `harvest` work on stopped sandboxes.
+  **not** re-add the git remote — `sbx-agents` reads the port from `sbx ls`
+  in that case, which is what makes `harvest` work on stopped sandboxes.
 - Uncommitted sandbox changes never cross; `sbx cp` remains the escape hatch
   for stray files.
 
@@ -167,28 +146,14 @@ Sandboxes reach GitHub over HTTPS out of the box; SSH remotes
 (`git@github.com:owner/repo.git`) need a key. The key is **never baked into an
 image** — images are pushed to a registry, and a secret in a layer is
 published. Instead the host mounts a dedicated key directory at sandbox
-creation and `config/setup-ssh.sh` installs it at launch.
-
-This is no longer purely optional: the skills repo is private, so **without a
-mounted key a sandbox cannot fast-forward its skill set** and runs on the
-image's baked floor instead.
+creation and `sbx-agent setup-ssh` installs it at launch.
 
 The key in `~/.ssh/sandbox` is currently registered as an **account-level SSH
-key** ("Checkfront - Sandboxes"), not a per-repo deploy key, so it already
-reaches `navcf/nav-skills` and every other repo on the account — nothing needs
-granting per repo. Note the trade-off that comes with it: an account key carries
-**write** access to everything you can push to, from inside a sandbox, whereas a
-deploy key would be scoped to one repo and can be read-only. A key cannot be
-both, so tightening this means a second dedicated keypair:
-
-```sh
-# Optional hardening: a read-only key scoped to the skills repo alone.
-ssh-keygen -t ed25519 -f ~/.ssh/sandbox-skills/id_ed25519 -N ''
-gh repo deploy-key add ~/.ssh/sandbox-skills/id_ed25519.pub -R navcf/nav-skills -t nav-skills
-```
-
-That needs `config/setup-ssh.sh` taught to install a second key and an
-`IdentityFile` entry for it, which it does not do today.
+key** ("Checkfront - Sandboxes"), not a per-repo deploy key, so it reaches
+every repo on the account — nothing needs granting per repo. Note the
+trade-off that comes with it: an account key carries **write** access to
+everything you can push to, from inside a sandbox, whereas a deploy key would
+be scoped to one repo and can be read-only.
 
 One-time host setup — a **dedicated keypair used only by sandboxes**, never
 your personal key:
@@ -221,83 +186,54 @@ Per sandbox, mount the key directory as an extra **read-only** workspace at
 creation (extra workspaces mount at the same absolute path as on the host):
 
 ```sh
-sbx create --clone --no-share-skills -e TZ=UTC -t <image> claude . ~/.ssh/sandbox:ro
+sbx create --clone -e TZ=UTC -t <image> claude . ~/.ssh/sandbox:ro
 ```
 
-At every launch the claude/codex shims run
-`/usr/local/share/sbx/setup-ssh.sh`: bind mounts preserve host ownership and
-ssh insists on a 600 key owned by the current user, so the key can't be used
-in place — the script copies it to `~/.ssh/github_sandbox` (0600, owned by
-`agent`), appends a grep-guarded `Host github.com` block to `~/.ssh/config`
-(`IdentitiesOnly yes`, so the dedicated key is the only one offered), and
-installs GitHub's published host keys into `~/.ssh/known_hosts` (baked from
-`api.github.com/meta` — no `ssh-keyscan` trust-on-first-use, no host-key
-prompt hanging the first git operation). cursor has no shim — run
-`sh /usr/local/share/sbx/setup-ssh.sh` once inside the sandbox; the result
-persists in the container filesystem. A non-standard key location can be
-pointed at with `-e SANDBOX_GITHUB_KEY=/abs/path/to/key` at creation.
+At every launch the claude/codex shims run `sbx-agent setup-ssh`: bind mounts
+preserve host ownership and ssh insists on a 600 key owned by the current
+user, so it copies the key to `~/.ssh/github_sandbox` (0600, agent-owned),
+appends a grep-guarded `Host github.com` block to `~/.ssh/config`
+(`IdentitiesOnly yes`), and installs GitHub's published host keys into
+`~/.ssh/known_hosts` (baked in — no `ssh-keyscan` prompt). A non-standard key
+location can be pointed at with `-e SANDBOX_GITHUB_KEY=/abs/path/to/key` at
+creation.
 
-Everything degrades gracefully: with no key mounted the script exits silently
+Everything degrades gracefully: with no key mounted this is a silent no-op
 and the sandbox boots exactly as before, HTTPS-only. Verify with
 `ssh -T git@github.com` (expect the "successfully authenticated" banner).
 
 ## Dev stack
 
-The images bake enough to bring a typical Node + Postgres monorepo up inside a
-sandbox — a seeded database, unit/integration/E2E tests, and a real browser for
-screenshots and video.
+The images bake `~/Projects/expedition`'s own dev stack — PostgreSQL 17
+(`pg_cron`, `pg_stat_statements`, `btree_gin`, `pg_trgm`, `pgcrypto`,
+`unaccent`; schema layout matching `postgres/Dockerfile` /
+`postgres/init-db.sql` exactly), Node, TypeScript, and a real browser for
+screenshots and video — and the project's own `manifest` CLI
+(`apps/cli/manifest.sh`) is the tool for everything workspace-specific:
+tests, migrations, seeding.
+
+`sbx-agent container-init`, baked as the image's `ENTRYPOINT`, starts Postgres
+before any agent CLI runs — so `sbx exec` and a bare `docker run` see it
+ready too, not just whichever agent's shim happens to fire. The
+`manifest`/`pgboss` schema bootstrap happens later, in the shim's `launch`
+step: a `--clone` sandbox's workspace can still be populating (git clone +
+`pnpm install`) when the entrypoint runs, so bootstrapping there raced an
+empty checkout; by the time `launch` reaches it the workspace is guaranteed
+present. On top of that, `pnpm manifest db migrate` (idempotent, unlike the
+destructive `db reset`) runs at every agent launch, so a container that
+stays up across many re-attaches still picks up migrations landed since the
+last one:
 
 ```sh
-devstack up        # start pg, bootstrap the db, .env from .env.example,
-                   # install deps; migrate+seed only if the db is still empty
-devstack status
-devstack reset     # explicit rebuild: re-bootstrap, migrate, reseed
-devstack down
+pnpm manifest db status    # migration status, connection info
+pnpm manifest db migrate   # apply pending migrations (safe; runs automatically too)
+pnpm manifest db reset     # destructive: drop + rebuild + re-migrate + regen types
+pnpm manifest test unit|api|e2e   # the sanctioned test runner — manages its own
+                                  # isolated schema/server for api/e2e
 ```
-
-With no config file, `up` infers the database name from the workspace's
-`.env`/`.env.example` (`DATABASE_NAME`, `POSTGRES_DB`, `PGDATABASE`, or the
-`DATABASE_URL` path) and warns that nothing was migrated or seeded. `up` never
-touches a database that already has tables — `MIGRATE_CMD` is commonly a full
-rebuild (`db reset`), so only the explicit `devstack reset` re-runs it.
-
-The claude/codex shims run `devstack up` automatically at every launch (a ~1s
-no-op once bootstrapped; it also restarts Postgres after a sandbox
-stop/resume), so first boot needs no manual bootstrapping and the baked global
-instructions (`config/CLAUDE.md` / `config/AGENTS.md`) tell agents to verify
-rather than bootstrap. cursor has no shim — run `devstack up` in the sandbox
-yourself, or let the project's `AGENTS.md` instruct the agent to.
-
-`devstack` itself is project-agnostic. Anything workspace-specific comes from an
-optional config file, resolved in order: `$DEVSTACK_CONF` (explicit path),
-`.local/.devstack.conf` (preferred — `.local/` is typically gitignored, so the
-config never dirties the workspace's `git status`), then a legacy
-`.devstack.conf` at the workspace root:
-
-```sh
-DB_NAME=myapp                       # database to create; also gets pg_cron
-INIT_SQL=db/init.sql                # optional, relative to the workspace root
-MIGRATE_CMD='pnpm db migrate'       # optional
-SEED_CMD='pnpm seed'                # optional; $SEED_PRESET is exported to it
-TEST_HINT='pnpm test'               # optional, printed when `up` finishes
-TOLERATE_MIGRATE_FAIL_IF='Migrations succeeded'
-    # optional: treat a non-zero MIGRATE_CMD as success when its output contains
-    # this string — for CLIs whose migrate wrapper ends in a step that cannot run
-    # in a sandbox (codegen shelling out to `docker exec`, say) after the
-    # migrations themselves have already applied.
-```
-
-Two behaviours worth knowing:
-
-- **No Docker-in-Docker.** Dev CLIs commonly probe for a local `psql` /
-  `pg_isready` and only fall back to `docker compose up` when nothing is
-  listening, so a native cluster satisfies them with far less machinery.
-- **`migrate` cleans up after itself.** If `MIGRATE_CMD` regenerates checked-in
-  files as a side effect, `devstack` reverts exactly the files that run dirtied,
-  and only those that were clean beforehand — work in progress is never touched.
 
 Four things the stock base image gets wrong, each fixed in
-`config/devstack-install.sh` (worth knowing because the symptoms point nowhere
+`config/build-install.sh` (worth knowing because the symptoms point nowhere
 near the cause):
 
 1. **Node has no TypeScript support.** `/usr/bin/node` is Ubuntu's package,
@@ -312,17 +248,18 @@ near the cause):
    .timeZone` then returns `undefined` and every temporal-polyfill entry point
    throws `TypeError: Invalid string: undefined`. `ENV TZ=UTC` in the Dockerfile
    loses to a real inherited value, which is why `sbx run` needs `-e TZ=UTC`.
-3. **Postgres TLS.** `sslmode=require` in a connection string is verified end to
-   end by node-postgres, so Ubuntu's snakeoil cert (named for the container)
-   gives `ERR_TLS_CERT_ALTNAME_INVALID` and any untrusted self-signed cert gives
-   `DEPTH_ZERO_SELF_SIGNED_CERT`. The image issues a `CN=localhost` cert and
-   trusts it, keeping the connection verified rather than downgrading to
-   `sslmode=disable`.
+3. **PostgreSQL 17 isn't in Ubuntu 26.04's own archive** (only 18 is), and
+   PGDG's apt repo ships `.deb`s built against a real release's exact library
+   versions that 26.04 doesn't have — a genuine cross-release ABI mismatch, not
+   something an `/etc/os-release` spoof can fix (confirmed by hitting exactly
+   that dependency conflict). So `build-install.sh` compiles PostgreSQL 17.7
+   itself from source against whatever 26.04 actually ships, with a
+   self-managed cluster (`initdb` + `pg_ctl`, not `postgresql-common`) — and
+   builds `pg_cron` via PGXS against that same self-built `pg_config`.
 4. **Playwright has no `ubuntu26.04-arm64` build** and refuses before
-   downloading. Ubuntu's `chromium` is a snap stub and Chrome has no Linux/arm64
-   build, so `config/install-browsers.sh` presents 24.04 in `/etc/os-release`
-   for the duration of the install; the noble arm64 binaries run fine on 26.04's
-   newer glibc.
+   downloading. `build-install.sh` presents 24.04 in `/etc/os-release` for the
+   duration of the install; the noble arm64 binaries run fine on 26.04's newer
+   glibc.
 
 ### TypeScript
 
@@ -345,137 +282,15 @@ inside an installed workspace, `pnpm exec tsc` and `npx tsc` resolve
 globals exist for scratch `.ts` files, a repo before its install has run, and
 one-off scripts outside any workspace.
 
-Postgres is **18**, from Ubuntu 26.04's main archive — no third-party repo, and
-`postgresql-18-cron` is packaged for arm64 as well as amd64. Pinning 17 would
-mean adding PGDG *and* compiling pg_cron from source on Apple Silicon, since
-PGDG builds `postgresql-17-cron` for amd64 only.
+Postgres is pinned to **17.7** to match expedition's own
+`postgres/Dockerfile` (`FROM postgres:17.7`) — `pg_dump` output is not
+identical across majors, and `schema.sql` / the migration baseline assume 17.
+Don't commit schema dumps generated in a sandbox.
 
-If a project's CI pins a different major, note that `pg_dump` output is not
-identical across majors — Postgres 18 emits named NOT NULL constraints where 17
-does not, for instance. Don't commit schema dumps generated in a sandbox.
-## Skills
-
-Skills are **committed content in [`navcf/nav-skills`](https://github.com/navcf/nav-skills)**,
-not build output. Each image carries a checkout of that repo at
-`~/.local/share/nav-skills` as an offline floor; every agent launch
-fast-forwards it and materializes it into the agent's skills dir. So a skill
-change needs a push, not a rebuild — and it lands in a *running* Claude session
-without a restart.
-
-**The repo is private**, which has two consequences:
-
-- **Fetching at launch needs the GitHub key** that `config/setup-ssh.sh`
-  provisions (the shims run it before the sync) plus
-  `sbx policy allow network "github.com:22"`. Both are already in place — the
-  mounted key is an account-level key, so it reaches this repo without a
-  per-repo grant; see "GitHub over SSH" for the privilege trade-off that
-  implies. Without a key the sync fails soft and the sandbox runs on the baked
-  floor: an older skill set, never an empty one.
-- **The build cannot clone it.** A credential must never end up in an image
-  layer, so `build.sh` passes a local checkout as a BuildKit named build context
-  (`--build-context nav-skills=../nav-skills`) and the Dockerfile copies it in
-  whole, `.git` included — so the result is a real clone whose `origin` is the
-  SSH remote, which is exactly what the launch-time fetch needs. The floor is
-  the checkout's committed `HEAD`; uncommitted skill edits are invisible to the
-  image.
-
-It stays private because most vendored skills are MIT upstream without the
-license text retained here, and one has no upstream license at all — see
-`VENDORING.md` in the skills repo.
-
-Why a clone plus a materialize step rather than cloning straight over the skills
-dir: Codex ships its own built-ins into `~/.codex/skills/.system`, so the skills
-dir is not exclusively ours. Materializing copies only the entries the repo
-tracks, so vendor content and anything an agent wrote are never touched. Git is
-the manifest — removals are computed by diffing the tracked entry list across
-the fast-forward, so no state file has to be kept in sync.
-
-### Managing them
-
-Inside a sandbox, via the `nav-skills` plugin (Claude) or the CLI (all agents):
-
-| | |
-|---|---|
-| `/nav-skills:sync` · `nav-skills sync` | fetch, fast-forward, materialize |
-| `/nav-skills:list` · `nav-skills list` | skills by category, with invocation mode |
-| `/nav-skills:new` · `nav-skills new <name> <mode>` | scaffold with correct per-agent frontmatter |
-| `/nav-skills:doctor` · `nav-skills doctor` | lint for discovery and consistency bugs |
-| `/nav-skills:harvest` · `nav-skills harvest` | package sandbox edits as a patch for review |
-
-`sync` is fast-forward-only and **refuses when the skills dir has diverged**, so
-it never discards work done in a sandbox — `harvest` packages it first. Harvest
-prepares a `git apply`-able patch and never commits or pushes: the clone is
-anonymous and read-only, so the sandbox holds no write credential.
-
-The `nav-skills/` plugin directory is a
-[skills-directory plugin](https://code.claude.com/docs/en/plugins-reference#skills-directory-plugins)
-— it auto-loads as `nav-skills@skills-dir` with no marketplace and no install
-step. It is materialized only into `~/.claude/skills`; Codex and cursor have no
-equivalent, and get the same verbs through the CLI.
-
-### The three agents are not equivalent
-
-| | Claude Code | Codex | cursor-agent (CLI) |
-|---|---|---|---|
-| Skills dir | `~/.claude/skills` | `~/.codex/skills` | `~/.cursor/skills` |
-| Vendor content to preserve | — | `.system/` | (its own live in `~/.cursor/skills-cursor/`) |
-| Honors `disable-model-invocation` | yes | **no** | yes |
-| Honors `user-invocable` | yes | no | no |
-| Picks up edits mid-session | **yes**, the dir is watched | auto-detects; restart if not | **no watcher** — start a new chat |
-| Loads the `nav-skills` plugin | yes | no | no |
-| Sync runs at launch from | `claude-shim.sh` | `codex-shim.sh` | `sessionStart` hook |
-
-Two consequences worth knowing rather than rediscovering:
-
-- **Codex ignores `disable-model-invocation`.** Its equivalent is
-  `agents/openai.yaml` → `policy.allow_implicit_invocation: false`. A skill meant
-  to be user-only is silently model-invocable on Codex unless both are set; the
-  skills repo sets them together and `nav-skills doctor` fails if they drift.
-- **cursor has no skills file watcher** — its catalog is fixed when a chat
-  starts. Sync at `sessionStart` means every *new* chat is current; a skill added
-  mid-chat needs a new chat, not a reload.
-
-cursor also gets its first launch hook here. Its launcher is an
-auto-update-managed symlink, so it has no shim; instead
-`config/cursor-session-start.sh` runs on `sessionStart`, syncing skills and
-returning `additional_context` — which doubles as the sandbox-guidance channel
-cursor otherwise lacks, having no global instructions file. That hook is merged
-into `~/.cursor/hooks.json` *after* `rtk init`, which owns `preToolUse` in the
-same file.
-
-### Invocation modes
-
-`metadata.invocation` in a skill's frontmatter is the source of truth, and is
-emitted per agent (see the [skills repo README](https://github.com/navcf/nav-skills)):
-
-| `metadata.invocation` | Claude / cursor | Codex `agents/openai.yaml` |
-|---|---|---|
-| `both` (default) | neither field | `allow_implicit_invocation: true` |
-| `user` | `disable-model-invocation: true` | `allow_implicit_invocation: false` |
-| `model` | `user-invocable: false` | *(no equivalent)* |
-
-### Adding a skill from upstream
-
-The [Vercel skills CLI](https://vercel.com/docs/agent-resources/skills) is kept
-only as an acquisition tool — it is no longer a build dependency:
-
-```sh
-npx skills find <query>                              # discover
-npx skills add <owner>/<repo> -s <name> -y --copy    # pull it in, then commit it
-```
-
-Move the skill directory into the `nav-skills` repo root, add its `metadata`
-block (the CLI's `skills-lock.json` supplies `source` and a content hash), and
-run `nav-skills doctor`. Skill discovery is one level deep in all three agents,
-so the repo is flat — grouping lives in `metadata.category`, not in directories.
-
-**Shared-skills shadowing**: unless a sandbox is created with
-`--no-share-skills`, sbx mounts its (host-side, initially empty) shared skills
-store over `~/.claude/skills`, `~/.agents/skills`, and `~/.cursor/skills`
-inside the container — hiding everything materialized at those paths. Always
-create sandboxes from these templates with `--no-share-skills`. (The codex image
-uses `~/.codex/skills`, which is not a mount target, but use the flag
-everywhere for consistency.)
+`sslmode=require` (expedition's `DATABASE_SSL_MODE` default) only encrypts —
+it never verifies the cert or hostname (see `buildSslConfig()` in
+`libs/server/db/src/db.ts`) — so the self-signed cert the image issues needs
+no CA trust-store wiring, unlike a `verify-full` setup.
 
 ## Stopping and resuming
 
@@ -484,20 +299,22 @@ Exiting an agent's TUI leaves its sandbox running in the background;
 state and restart automatically on the next `sbx run`. A computer restart
 just stops them the same way — nothing is lost.
 
-After a reboot: start Docker Desktop, run `./host-services.sh`, then
-re-attach from the workspace dir. Each agent resumes its previous
-conversation with its own flag, passed after `--`:
+After a reboot: start Docker Desktop, run `./host-services.sh` and bring the
+`gitnexus` compose service back up (see "Workflow"), then re-attach from the
+workspace dir. Each agent resumes its previous conversation with its own
+flag, passed after `--`:
 
 ```sh
 sbx run claude -- --continue     # resume the last claude conversation
 sbx run codex -- resume --last   # resume the last codex session (or `resume` for a picker)
-sbx run cursor -- --resume       # pick a cursor chat (or `-- --continue` for the latest)
 ```
 
 `sbx rm` is what actually discards state: the container filesystem — and
-with it codex/cursor session history — is gone. Claude's conversation
-history lives on sbx-managed persistent volumes (`~/.claude/projects` etc.)
-and survives even removal/recreation.
+with it codex session history — is gone. Claude's conversation history lives
+on sbx-managed persistent volumes (`~/.claude/projects` etc.) and survives
+even removal/recreation. For a `--clone` sandbox, prefer `sbx-agents rm` over
+bare `sbx rm` — it also drops the host-side worktree, local branch, and
+stale remote (see "Clone mode: syncing work").
 
 ## Agent-to-agent review
 
@@ -505,16 +322,16 @@ Agents cannot run each other's CLIs inside their own sandbox: sbx injects
 credentials and allows API domains per agent manifest, so e.g. `codex` inside
 the claude sandbox has no OpenAI key and no route to `api.openai.com`.
 Instead, `host-services.sh` serves an MCP server (`agents`, registered in
-all three templates) with two tools:
+both templates) with two tools:
 
 - `ask_agent({agent, prompt, workdir})` — starts the target agent **headlessly
-  inside its own sandbox** via `sbx exec` (`claude -p` / `codex exec` /
-  `cursor-agent -p`), against the same shared workspace. `workdir` is the
-  absolute workspace path, used to find the peer's sandbox (falls back to the
-  default `<agent>-<workdir>` name; pass `sandbox` to override). The call
-  blocks up to `wait_seconds` (default 50): a fast peer's answer is returned
-  directly; a slow one gets you a **job id** while it keeps running on the
-  host (up to `timeout_seconds`, default/max 1h).
+  inside its own sandbox** via `sbx exec` (`claude -p` / `codex exec`),
+  against the same shared workspace. `workdir` is the absolute workspace
+  path, used to find the peer's sandbox (falls back to the default
+  `<agent>-<workdir>` name; pass `sandbox` to override). The call blocks up
+  to `wait_seconds` (default 50): a fast peer's answer is returned directly;
+  a slow one gets you a **job id** while it keeps running on the host (up to
+  `timeout_seconds`, default/max 1h).
 - `get_agent_response({job_id})` — long-poll a running job: blocks up to
   `wait_seconds` (default 50) and returns either the final answer or a status
   line (elapsed time + tail of the peer's output so far). Finished answers
@@ -522,9 +339,8 @@ all three templates) with two tools:
   connection in between.
 
 The short per-call window is deliberate: it sits under every MCP client's
-tool-timeout floor (codex defaults to 60s, cursor's client timeout is not
-configurable), so a 45-minute adversarial review is a series of cheap 50s
-polls instead of one fragile hour-long HTTP request.
+tool-timeout floor (codex defaults to 60s), so a 45-minute adversarial review
+is a series of cheap 50s polls instead of one fragile hour-long HTTP request.
 
 So with claude and codex sandboxes on the same workspace, you can tell
 claude: *"implement X, then ask codex to review your diff"* — claude calls
@@ -539,9 +355,7 @@ calls (no review-of-review loops).
 ## How it works
 
 - Sandboxes do **not** sync host `~/.claude`; the claude image bakes
-  `~/.claude/CLAUDE.md`, RTK hooks (`rtk init --global --auto-patch`), and the
-  gitnexus MCP registration in `~/.claude.json`. Skills are the exception —
-  they come from git at launch, not from the image (see "Skills").
+  `~/.claude/CLAUDE.md` and the gitnexus MCP registration in `~/.claude.json`.
 - sbx **re-seeds `~/.claude.json` at sandbox creation**, clobbering the baked
   MCP registration. The Dockerfile moves the native-install launcher symlink
   (`/home/agent/.local/bin/claude`) to `claude-real` and puts a shim in its
@@ -551,34 +365,17 @@ calls (no review-of-review loops).
 - The codex image uses the same shim trick with less ceremony: sbx seeds
   `~/.codex/config.toml` unconditionally at sandbox (re)create, so
   `codex-shim.sh` — at `/home/agent/.local/bin/codex`, which precedes the real
-  npm-global binary on PATH, no `mv` needed — appends the gitnexus block via
-  `config/gitnexus-mcp-codex.sh` (grep-guarded, never a rewrite) before
-  `exec`ing the real codex. Skills materialize into `~/.codex/skills` (codex's
-  global skills dir, and not a shared-store mount target), leaving codex's own
-  built-ins under `.system/` untouched. Global instructions live
-  at `~/.codex/AGENTS.md`. RTK has no codex integration, so the binary ships
-  hook-less with usage guidance in `AGENTS.md`.
-- The cursor image needs **no shim**: sbx's cursor manifest seeds only
-  `~/.cursor/cli-config.json` (and only if missing) and never rewrites an MCP
-  config, so the baked `~/.cursor/mcp.json` survives creation (verified).
-  RTK hooks are wired via `rtk init --global --agent cursor`
-  (`~/.cursor/hooks.json`, `preToolUse` → `rtk hook cursor`), and a
-  `sessionStart` entry is merged into the same file afterwards to sync skills
-  into `~/.cursor/skills` (needs `--no-share-skills`, see above). cursor-agent
-  has no global instructions file — it reads `AGENTS.md`/`CLAUDE.md` at the
-  project root only — so that hook's `additional_context` carries the
-  sandbox guidance instead. Auth is injected per-run as `CURSOR_AUTH_TOKEN` by sbx
-  (`AGENT_CLI_CREDENTIAL_STORE=memory`); sbx also pre-trusts the workspace so
-  the TUI skips its trust prompt.
+  npm-global binary on PATH, no `mv` needed — delegates to `sbx-agent launch
+  codex`, which appends the gitnexus block (grep-guarded, never a rewrite)
+  before `exec`ing the real codex. Global instructions live at
+  `~/.codex/AGENTS.md`.
 - The workspace mounts at the same absolute path as on the host — never bake
-  files under a workspace path (the mount would shadow them).
-- Nothing in the sandbox depends on this directory. Skills come from the
-  `nav-skills` repo over HTTPS, so they need no host-side state at all;
-  project-specific skills belong in the workspace's own `.claude/skills`, which
-  Claude Code discovers natively (with live reload) in both bind-mount and
-  `--clone` modes.
+  files under a workspace path (the mount would shadow them). Project-specific
+  skills belong in the workspace's own `.claude/skills`/`.agents/skills`
+  (expedition already has these), which each agent discovers natively —
+  nothing in this repo needs to deliver skills.
 - gitnexus itself never runs in the sandbox; MCP traffic goes to the host via
-  `http://host.docker.internal:4747/mcp`.
+  `http://host.docker.internal:4747/api/mcp`.
 
 ## Troubleshooting
 
@@ -596,47 +393,21 @@ calls (no review-of-review loops).
 - **gitnexus missing from codex's MCP servers**: `~/.codex/config.toml` was
   re-seeded and the shim didn't run — check that
   `/home/agent/.local/bin/codex` is the shim script, and re-assert manually
-  with `sh /usr/local/share/sbx/gitnexus-mcp-codex.sh`.
-- **gitnexus missing from cursor's MCP servers**: re-assert manually with
-  `node /usr/local/share/sbx/gitnexus-mcp-cursor.cjs` (and report it — sbx is
-  not expected to touch `~/.cursor/mcp.json`).
-- **Skills missing inside a sandbox** (`ls ~/.claude/skills` or
-  `~/.cursor/skills` is empty): the sandbox was created without
-  `--no-share-skills`, so sbx mounted its empty shared store over the
-  materialized dir. Recreate the sandbox with the flag. `nav-skills status`
-  shows the clone, the target, and whether they diverge.
-- **`warn: skills sync failed` / `fetch failed — using the baked snapshot`**: the
-  sandbox is running on the image's baked skill floor — an older set, not no set.
-  The skills repo is private, so the fetch needs both a mounted key with access
-  to it (see "GitHub over SSH") and
-  `sbx policy allow network "github.com:22"`. Check with
-  `ssh -T git@github.com` and `nav-skills status`, and `sbx policy log` for
-  blocked egress.
-- **`./build.sh` fails with `no nav-skills checkout at ...`**: the image bakes its
-  skill floor from a local checkout, since the private repo cannot be cloned at
-  build time. `git clone git@github.com:navcf/nav-skills.git ../nav-skills`, or
-  point `NAV_SKILLS_SRC` at an existing checkout.
-- **`nav-skills sync` refuses with "local edits"**: the skills dir has diverged
-  from the clone, which is the guard against silently discarding work done in
-  the sandbox. Run `nav-skills harvest` to package the changes as a patch, pull
-  it to the host with the `sbx cp` line it prints, then re-run sync.
-  `nav-skills sync --force` is the explicit discard.
-- **A skill edited in the sandbox keeps reverting**: it was edited in the
-  materialized copy under the agent's skills dir, which the next sync
-  overwrites. Edit the clone at `~/.local/share/nav-skills` instead.
-- **cursor doesn't see a new skill**: cursor-agent has no skills file watcher —
-  its catalog is fixed when a chat starts. Start a new chat. If a *new chat*
-  also misses it, the `sessionStart` hook may not have fired: check that
-  `~/.cursor/hooks.json` still contains both the rtk `preToolUse` entry and the
-  `sessionStart` one, re-assert with
-  `node /usr/local/share/sbx/cursor-hooks-merge.cjs`, and run
-  `nav-skills sync` by hand meanwhile.
+  with `sbx-agent gitnexus-codex`.
+- **Postgres isn't up / `pnpm manifest db status` shows nothing listening**:
+  `sbx-agent container-init` runs once as the image's `ENTRYPOINT`, before the
+  agent CLI — check `pg_isready -h localhost -p 5432` and
+  `sudo tail -30 /var/log/postgresql/postgresql-17-main.log`. A `docker exec`
+  into the container (or `sbx exec`) re-triggers nothing; only a fresh
+  container start (or sandbox stop/resume) re-runs the entrypoint.
+- **`postgres/init-db.sql` bootstrap failed**: this step warns to stderr
+  rather than blocking the launch. Re-run it by hand: `sudo -u postgres psql
+  -f ~/Projects/expedition/postgres/init-db.sql`.
+- **`manifest db migrate` failed at launch**: non-fatal by design (the shims
+  warn and continue). Diagnose with `pnpm manifest db status`, then re-run
+  `pnpm manifest db migrate` by hand.
 - **codex not signed in**: run `sbx secret set -g openai --oauth` on the host,
   then recreate the sandbox.
-- **cursor not signed in**: cursor OAuth cannot be started from
-  `sbx secret set` — sign in from inside the cursor sandbox itself (the TUI
-  prompts on first run); the proxy captures it globally. Alternatively store
-  an API key with `sbx secret set -g cursor`.
 - **`ask_agent` times out**: individual MCP calls should never come near a
   client timeout anymore — `ask_agent`/`get_agent_response` block only
   `wait_seconds` (default 50s) per call while the peer runs asynchronously on
@@ -645,10 +416,10 @@ calls (no review-of-review loops).
   (restart `./host-services.sh`), or the caller passed a large explicit
   `wait_seconds` that exceeds its own client timeout — claude's is
   `MCP_TOOL_TIMEOUT=3600000` in `config/claude-settings.json`, codex's is
-  `tool_timeout_sec = 3600` in `config/gitnexus-mcp-codex.sh` (60s default if
+  `tool_timeout_sec = 3600` set by `sbx-agent gitnexus-codex` (60s default if
   the config block predates that setting — the grep-guarded append never
-  upgrades an existing `[mcp_servers.agents]` block), and cursor's is not
-  configurable at all. Stick to the default `wait_seconds` and poll. A job
+  upgrades an existing `[mcp_servers.agents]` block). Stick to the default
+  `wait_seconds` and poll. A job
   erroring with "peer run killed after 3600s" genuinely exceeded the 1h cap —
   split the review into narrower prompts (one subsystem or one diff per call).
 - **`ask_agent` fails or hangs**: check the bridge is running on the host
@@ -667,8 +438,7 @@ calls (no review-of-review loops).
 - **`git@github.com: Permission denied (publickey)`**: no key was provisioned
   (the sandbox was created without the `~/.ssh/sandbox:ro` mount — recreate it
   with the mount), the shim didn't run (`ls -l ~/.ssh/github_sandbox`;
-  re-assert with `sh /usr/local/share/sbx/setup-ssh.sh`), or the public key
-  was never granted access on GitHub. In a cursor sandbox the script never
-  runs automatically — run it by hand once. See "GitHub over SSH".
+  re-assert with `sbx-agent setup-ssh`), or the public key was never granted
+  access on GitHub. See "GitHub over SSH".
 - **Stale gitnexus index**: re-run the analyze on the host — never inside the
   sandbox.

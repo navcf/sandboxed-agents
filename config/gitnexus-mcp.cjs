@@ -6,7 +6,7 @@ const p = process.env.HOME + '/.claude.json';
 const j = fs.existsSync(p) ? JSON.parse(fs.readFileSync(p, 'utf8')) : {};
 j.mcpServers = {
   ...j.mcpServers,
-  gitnexus: { type: 'http', url: 'http://host.docker.internal:4747/mcp' },
+  gitnexus: { type: 'http', url: 'http://host.docker.internal:4747/api/mcp' },
   agents: { type: 'http', url: 'http://host.docker.internal:4748/mcp' },
 };
 fs.writeFileSync(p, JSON.stringify(j, null, 2));

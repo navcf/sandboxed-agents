@@ -1,0 +1,576 @@
+#!/usr/bin/env sh
+# Host-side CLI for sandboxed agents working on ~/Projects/expedition
+# (Checkfront/expedition on GitHub) — the only repo this tool knows about.
+# Launches a sandbox on a GitHub issue/PR, and syncs git commits with its
+# `--clone` sandbox afterward.
+#
+# Usage: sbx-agents <command> [args...]
+#   issue    launch/re-attach a sandbox with a GitHub issue or PR preloaded
+#   ls       list expedition's clone sandboxes and their branches
+#   pull     fetch a sandbox's branch into a local worktree
+#   push     make a sandbox's clone see your host commits
+#   harvest  fetch from a stopped sandbox, then stop it again
+#   clean    remove a pull's worktree + local branch
+#   rm       destroy a sandbox and its host-side worktree/branch
+#
+# `sbx-agents <command> --help` (or with no command) shows full usage.
+set -eu
+
+WORKSPACE=/Users/nav/Projects/expedition
+GH_REPO=Checkfront/expedition
+# Shared pnpm store, mounted into every sandbox `issue` creates (see
+# config/agent.sh, which points `pnpm install --store-dir` at this same
+# path) — one host-wide package cache instead of every fresh --clone
+# sandbox downloading its own copy.
+PNPM_STORE_DIR=/Users/nav/.cache/sbx-pnpm-store
+
+die() { echo "sbx-agents: $*" >&2; exit 1; }
+
+usage() {
+  cat <<'EOF'
+usage: sbx-agents <command> [args...]
+
+All commands operate on ~/Projects/expedition (Checkfront/expedition on
+GitHub) regardless of the current directory.
+
+  issue [--no-clone] [--prep-only] AGENT ISSUE_OR_PR [SBX_RUN_FLAGS...]
+      Fetch a GitHub issue or PR and launch `sbx run` with the sandbox named
+      <AGENT>-<id> and the item preloaded as context.
+
+        AGENT           claude | codex (get this repo's baked template
+                        automatically) or any other sbx agent
+        ISSUE_OR_PR     issue/PR number, or a full https://github.com/... URL
+        --no-clone      work directly on the host working tree (default is
+                        --clone: the agent gets a private clone; sync with
+                        the commands below)
+        --prep-only     fetch context, create the sandbox and seed the
+                        context into it, then print
+                        sandbox=/context=/sandbox_context= lines and exit
+                        instead of attaching the TUI — for headless drivers
+                        (`sbx exec NAME claude -p ...`)
+        SBX_RUN_FLAGS   passed through to `sbx run` (e.g. -t IMAGE)
+
+      defaults, applied at sandbox creation: --clone, and for claude/codex
+      also the baked template (your own -t wins). Extra dirs are mounted
+      when they exist: $SBX_ISSUE_NOTES_DIR (default
+      /Users/nav/Documents/Notes; set it empty to skip) and
+      ~/.ssh/sandbox:ro (GitHub SSH key — see README "GitHub over SSH").
+
+      Re-running with the same AGENT and id re-attaches to the existing
+      sandbox (creation flags are ignored) and re-sends the initial prompt.
+
+      examples:
+        sbx-agents issue claude 1234                 # sandbox claude-1234
+        sbx-agents issue claude 88 --no-clone        # bind-mount sandbox
+        sbx-agents issue codex https://github.com/Checkfront/expedition/pull/42
+
+  ls
+      Fetch every --clone sandbox of this repo and show each one's branches
+      (last commit + how far ahead of your HEAD); stopped sandboxes are
+      listed with a harvest hint.
+
+  pull [--force] [SANDBOX] [BRANCH]
+      Fetch SANDBOX's branches and check BRANCH out in a worktree at
+      ../<repo>-wt/<sandbox>-<branch>, on local branch sbx/<sandbox>/<branch>
+      — inspect and run tests there without touching your working tree.
+      BRANCH defaults to the branch checked out in the sandbox. When the
+      sandbox amended/rebased commits you already pulled, the worktree
+      follows the rewrite automatically — unless it has local changes or
+      commits, which need --force (or a manual rescue) to discard.
+
+  push [SANDBOX] [BRANCH]
+      Make the sandbox's clone see your host commits: runs
+      `git fetch host [BRANCH]` inside the sandbox (`host` is the live
+      read-only mount of this repo). The agent still has to rebase — tell it
+      to `git rebase host/<branch>`.
+
+  harvest SANDBOX
+      Fetch from a STOPPED sandbox: wake it with `sbx exec`, fetch all
+      branches, stop it again (a running sandbox is left running).
+
+  clean [--force] [SANDBOX] [BRANCH]
+      Undo pull: remove the worktree(s) and local sbx/<sandbox>/* branch(es)
+      for SANDBOX (all of them, or just BRANCH). Refuses a dirty worktree or
+      a branch with commits its sandbox never saw unless --force is given.
+      Once the sandbox itself is gone (sbx rm), also drops the leftover
+      fetch refs and stale remote.
+
+  rm [--force] SANDBOX
+      Completely remove SANDBOX: same worktree/branch teardown as `clean`
+      (all branches; same --force rules), then `sbx rm SANDBOX` and drop its
+      git remote and fetch refs. Use this instead of `sbx rm` + `clean` by
+      hand.
+
+SANDBOX (ls/pull/push/harvest/clean/rm) is the sbx sandbox name (`sbx ls`),
+e.g. claude-1234; pull/push may omit it when exactly one sandbox remote
+exists for this repo. Only commits cross the boundary — uncommitted sandbox
+changes are invisible until the agent commits.
+EOF
+}
+
+[ $# -ge 1 ] || { usage >&2; exit 2; }
+case $1 in -h|--help|help) usage; exit 0 ;; esac
+cmd=$1
+shift
+
+# Every command targets this one repo regardless of the caller's cwd.
+cd "$WORKSPACE" 2>/dev/null || die "workspace not found: $WORKSPACE"
+top=$WORKSPACE
+repo=$(basename "$WORKSPACE")
+
+# ── issue ────────────────────────────────────────────────────────────────────
+# Fetches the item with `gh` (title, body, labels, comments; diff stat for
+# PRs), writes it to <workspace>/.local/sbx-context/<issue|pr>-<id>.md, copies
+# that file into the sandbox at /tmp/sbx-context/, and attaches
+# `sbx run --name <agent>-<id>` with an initial prompt pointing the agent at
+# the in-sandbox copy. `.local/` is typically gitignored, so the host file
+# never dirties the workspace's git status.
+#
+# The copy is not redundant: in --clone mode sbx backs the workspace path with
+# a container-local volume holding the agent's private clone, so a gitignored
+# host file never reaches the workspace. (The host tree itself IS reachable,
+# read-only, at /run/sandbox/source — but that path is an implementation
+# detail of clone mode, and /tmp/sbx-context/ is stable in both modes.)
+cmd_issue() {
+  clone=1 prep_only=
+  while [ $# -gt 0 ]; do
+    case $1 in
+      -h|--help) usage; exit 0 ;;
+      --no-clone) clone=; shift ;;
+      --prep-only) prep_only=1; shift ;;
+      *) break ;;
+    esac
+  done
+  [ $# -ge 2 ] || { usage >&2; exit 2; }
+  agent=$1 ref=$2
+  shift 2
+  # Everything left in "$@" is passed through to `sbx run`.
+
+  command -v gh >/dev/null 2>&1 || die "gh CLI not found — install it (https://cli.github.com) and run 'gh auth login'"
+  gh auth status >/dev/null 2>&1 || die "gh is not authenticated — run 'gh auth login'"
+
+  # Resolve the item number — always against GH_REPO, even if a URL for a
+  # fork or different repo was pasted by mistake (gh api below will 404).
+  case $ref in
+    *://github.com/*/pull/*|*://github.com/*/issues/*)
+      num=$(echo "$ref" | sed -E 's#.*/(pull|issues)/([0-9]+).*#\2#') ;;
+    *[!0-9]*|'') die "ISSUE_OR_PR must be a number or a github.com issue/PR URL: $ref" ;;
+    *) num=$ref ;;
+  esac
+
+  # One API call resolves existence, issue-vs-PR, and the title. (Every PR is
+  # an issue to this endpoint; only PRs carry a pull_request key.)
+  meta=$(gh api "repos/$GH_REPO/issues/$num" \
+           --jq '(if has("pull_request") then "pr" else "issue" end) + " " + .title') \
+    || die "#$num not found in $GH_REPO (or no access)"
+  kind=${meta%% *} title=${meta#* }
+
+  workspace=$WORKSPACE
+  sandbox=$agent-$num
+  ctx_dir=$workspace/.local/sbx-context
+  ctx_file=$ctx_dir/$kind-$num.md
+  # Where the agent reads it from: the host path does not resolve inside the
+  # sandbox (see the note above), so the file is copied in.
+  sbx_ctx_dir=/tmp/sbx-context
+  sbx_ctx_file=$sbx_ctx_dir/$kind-$num.md
+  mkdir -p "$ctx_dir"
+
+  echo "==> fetching $kind #$num from $GH_REPO: $title"
+  if [ "$kind" = issue ]; then
+    gh issue view "$num" -R "$GH_REPO" \
+      --json number,title,url,state,author,labels,body,comments --jq '
+      "# Issue #\(.number): \(.title)\n\n" +
+      "- URL: \(.url)\n- State: \(.state)\n- Author: \(.author.login // "unknown")\n" +
+      "- Labels: \(if (.labels|length) == 0 then "(none)" else (.labels|map(.name)|join(", ")) end)\n\n" +
+      "## Description\n\n\(if (.body // "") == "" then "(no description)" else .body end)\n\n" +
+      "## Comments\n\n" +
+      (if (.comments|length) == 0 then "(none)\n"
+       else (.comments|map("### \(.author.login // "unknown") — \(.createdAt)\n\n\(.body)\n")|join("\n")) end)
+    ' > "$ctx_file"
+  else
+    gh pr view "$num" -R "$GH_REPO" \
+      --json number,title,url,state,author,labels,body,comments,baseRefName,headRefName,additions,deletions,changedFiles --jq '
+      "# PR #\(.number): \(.title)\n\n" +
+      "- URL: \(.url)\n- State: \(.state)\n- Author: \(.author.login // "unknown")\n" +
+      "- Branch: \(.headRefName) -> \(.baseRefName)\n" +
+      "- Size: \(.changedFiles) files changed, +\(.additions) -\(.deletions)\n" +
+      "- Labels: \(if (.labels|length) == 0 then "(none)" else (.labels|map(.name)|join(", ")) end)\n\n" +
+      "## Description\n\n\(if (.body // "") == "" then "(no description)" else .body end)\n\n" +
+      "## Comments\n\n" +
+      (if (.comments|length) == 0 then "(none)\n"
+       else (.comments|map("### \(.author.login // "unknown") — \(.createdAt)\n\n\(.body)\n")|join("\n")) end)
+    ' > "$ctx_file"
+    {
+      printf '\n## Diff stat\n\n```\n'
+      gh api --paginate "repos/$GH_REPO/pulls/$num/files" \
+        --jq '.[] | "\(.filename) | +\(.additions) -\(.deletions) (\(.status))"' \
+        || echo "(diff stat unavailable)"
+      printf '```\n'
+    } >> "$ctx_file"
+  fi
+  echo "==> context written to $ctx_file"
+
+  # Issues: understand and propose, never implement unprompted. PRs: review
+  # and report findings; the review itself proceeds, but the code stays
+  # untouched.
+  case $kind in
+    issue)
+      kind_label=issue extras=
+      task="Read that file first, then build an understanding of the problem: explore the parts of the codebase it touches and reference the relevant files/symbols by path.
+
+Do NOT implement anything yet. Reply with (1) a short summary of the problem in your own words, (2) a potential solution — the approach you would take, the files you would change, and any risks or open questions — and then wait for further instructions before making changes." ;;
+    pr)
+      kind_label='pull request' extras=', diff stat'
+      task="Read that file first (it names the head and base branches), fetch the PR branch (e.g. git fetch origin <head>), and study the diff against the base until you understand what the change does and the problem it is solving.
+
+Then review it — correctness bugs, edge cases, security or performance risks, missing tests, needless complexity — verifying suspicions against the actual code rather than the diff alone.
+
+Do NOT modify any code. Present your findings: (1) a short summary of what the PR does and why, (2) the issues found, ordered by severity, each referencing file/line, or a note that you found none, and (3) an overall assessment (looks good / needs changes). Then wait for further instructions." ;;
+  esac
+  prompt="You are working on GitHub $kind_label #$num in $GH_REPO: \"$title\".
+
+The full $kind_label content (description, labels, comments$extras) is saved
+inside this sandbox at:
+  $sbx_ctx_file
+
+$task"
+
+  # Creation always goes through `sbx create` and the initial prompt is
+  # delivered by the separate `sbx run --name` attach at the bottom: the
+  # context has to be copied in between those two steps, and a re-attach
+  # cannot be handed the agent/workspace positionals again.
+  if sbx ls -q 2>/dev/null | grep -qx "$sandbox"; then
+    echo "==> sandbox $sandbox already exists; creation flags ignored"
+  else
+    # claude/codex use this repo's baked template; other agents use sbx's
+    # stock image.
+    template=
+    case $agent in
+      claude) template=docker.io/navcf/sandbox-templates:claude-code ;;
+      codex)  template=docker.io/navcf/sandbox-templates:codex ;;
+    esac
+    for arg in "$@"; do
+      case $arg in
+        -t|--template|--template=*) template= ;;  # user override wins
+        --clone) clone= ;;                        # already passed, don't duplicate
+      esac
+    done
+
+    # Default extra mounts (positional, after the workspace; extra
+    # workspaces mount at their host-absolute path). Each is skipped
+    # silently when absent: the Notes dir the baked instructions write plans
+    # to, the dedicated GitHub SSH key dir consumed by `sbx-agent setup-ssh`
+    # (read-only), and the shared pnpm store (read-write — every sandbox
+    # adds newly-downloaded packages back to it), created on first use.
+    notes=${SBX_ISSUE_NOTES_DIR-/Users/nav/Documents/Notes}
+    mkdir -p "$PNPM_STORE_DIR"
+    set -- "$@" "$agent" "$workspace"
+    [ -n "$notes" ] && [ -d "$notes" ] && set -- "$@" "$notes"
+    [ -d "$HOME/.ssh/sandbox" ] && set -- "$@" "$HOME/.ssh/sandbox:ro"
+    set -- "$@" "$PNPM_STORE_DIR"
+    [ -z "$template" ] || set -- -t "$template" "$@"
+    [ -z "$clone" ] || set -- --clone "$@"
+    set -- create --name "$sandbox" "$@"
+    echo "==> sbx $*" | head -c 300; echo
+    sbx "$@"
+  fi
+
+  # `sbx cp` does not create parent directories, hence the mkdir; both it and
+  # `sbx exec` wake a stopped sandbox on their own.
+  sbx exec "$sandbox" -- mkdir -p "$sbx_ctx_dir" >/dev/null
+  sbx cp "$ctx_file" "$sandbox:$sbx_ctx_file" >/dev/null
+  echo "==> context copied into $sandbox at $sbx_ctx_file"
+
+  if [ -n "$prep_only" ]; then
+    # Created and seeded without attaching; the caller drives the agent headlessly.
+    printf 'sandbox=%s\ncontext=%s\nsandbox_context=%s\nrepo=%s\nkind=%s\n' \
+      "$sandbox" "$ctx_file" "$sbx_ctx_file" "$GH_REPO" "$kind"
+    return 0
+  fi
+  echo "==> sbx run --name $sandbox"
+  exec sbx run --name "$sandbox" -- "$prompt"
+}
+
+# ── ls / pull / push / harvest / clean ──────────────────────────────────────
+# Sync git work between the host repo and its `sbx create --clone` sandboxes.
+# Clone-mode plumbing sbx already provides, which these wrap:
+# - Each running clone sandbox serves a git daemon (published to a host
+#   loopback port); sbx maintains a `sandbox-<name>` remote in the host repo
+#   pointing at it while the sandbox runs (removed on stop, re-added with a
+#   fresh port on `sbx run` — but NOT on `sbx exec`, so this falls back to
+#   reading the port from `sbx ls`).
+# - The host repo is mounted live and read-only inside the sandbox at
+#   /run/sandbox/source; the shims register it as the `host` remote in the
+#   clone, so host->sandbox is a fetch run inside the sandbox.
+# Only commits cross the boundary in either direction.
+
+sbx_state() { # STATUS column for sandbox $1, empty if unknown
+  sbx ls 2>/dev/null | awk -v n="$1" '$1 == n { print $3 }'
+}
+
+# Die early when sandbox $sb exists but isn't one of expedition's — otherwise
+# the daemon rejects the fetch with a misleading "repository not exported".
+# The primary workspace is the first path column in its `sbx ls` row (later
+# paths are extra mounts like Notes or the SSH key dir).
+check_workspace() {
+  ws=$(sbx ls 2>/dev/null | awk -v n="$sb" \
+    '$1 == n { for (i = 2; i <= NF; i++) if ($i ~ /^\//) { sub(/,$/, "", $i); print $i; exit } }')
+  [ -z "$ws" ] || [ "$ws" = "$top" ] \
+    || die "sandbox '$sb' belongs to $ws, not $WORKSPACE — wrong name?"
+}
+
+# Resolve $sb from an explicit arg, or from the sole sandbox-* remote.
+resolve_sandbox() {
+  if [ -n "${1:-}" ]; then
+    sb=${1#sandbox-}
+    return
+  fi
+  set -- $(git remote | sed -n 's/^sandbox-//p')
+  case $# in
+    1) sb=$1 ;;
+    0) die "no sandbox remote for this repo — pass a sandbox name (see: sbx ls; stopped sandboxes need 'sbx-agents harvest <name>')" ;;
+    *) die "multiple sandboxes for this repo ($*) — pass one" ;;
+  esac
+}
+
+# Set $tgt to something fetchable for sandbox $sb: the sbx-managed remote if
+# present, else a git:// URL built from the daemon port in `sbx ls` (covers
+# sandboxes woken by `sbx exec`, where sbx does not re-add the remote).
+sandbox_target() {
+  if git remote get-url "sandbox-$sb" >/dev/null 2>&1; then
+    tgt=sandbox-$sb
+    return 0
+  fi
+  port=$(sbx ls 2>/dev/null | awk -v n="$sb" '$1 == n' \
+    | sed -n 's/.*127\.0\.0\.1:\([0-9]*\)->9418.*/\1/p')
+  [ -n "$port" ] || return 1
+  tgt=git://127.0.0.1:$port/$repo
+}
+
+# Fetch all of $sb's branches into refs/remotes/sandbox-$sb/*.
+fetch_sandbox() {
+  sandbox_target || return 1
+  git fetch -q --prune "$tgt" "+refs/heads/*:refs/remotes/sandbox-$sb/*"
+}
+
+# Set $hb to the branch checked out in sandbox $sb (daemon HEAD symref);
+# falls back to the sole fetched branch when HEAD is detached.
+sb_head_branch() {
+  hb=$(git ls-remote --symref "$tgt" HEAD 2>/dev/null \
+    | sed -n 's|^ref: refs/heads/\(.*\)[[:space:]]HEAD$|\1|p')
+  if [ -z "$hb" ]; then
+    set -- $(git for-each-ref "refs/remotes/sandbox-$sb" --format='%(refname:lstrip=3)' | grep -vx HEAD)
+    [ $# -eq 1 ] && hb=$1
+  fi
+}
+
+print_branches() { # branches of $sb, with ahead-of-HEAD counts
+  # grep -vx HEAD: git >= 2.42 records the remote's HEAD as
+  # refs/remotes/<remote>/HEAD on fetch — not a branch, skip it.
+  refs=$(git for-each-ref "refs/remotes/sandbox-$sb" --format='%(refname)' \
+    | grep -v "^refs/remotes/sandbox-$sb/HEAD\$" || true)
+  [ -n "$refs" ] || { echo '  (no branches)'; return; }
+  for ref in $refs; do
+    printf '  %-40s %s  [%s ahead of HEAD]\n' \
+      "${ref#refs/remotes/sandbox-$sb/}" \
+      "$(git log -1 --format='%h %s' "$ref")" \
+      "$(git rev-list --count "HEAD..$ref")"
+  done
+}
+
+cmd_ls() {
+  # Union of sbx-managed remotes and `sbx ls` rows for this workspace: a
+  # stopped sandbox has no remote, a crashed/removed one may leave a stale one.
+  names=$({ git remote | sed -n 's/^sandbox-//p'
+            sbx ls 2>/dev/null | awk -v ws="$top" 'NR > 1 && index($0, ws) { print $1 }'
+          } | sort -u)
+  if [ -z "$names" ]; then
+    echo "no clone sandboxes found for this repo (running ones appear as sandbox-<name> remotes; see sbx ls)"
+    return
+  fi
+  for sb in $names; do
+    if [ "$(sbx_state "$sb")" = stopped ]; then
+      echo "$sb: stopped — fetch with: sbx-agents harvest $sb"
+      continue
+    fi
+    if fetch_sandbox 2>/dev/null; then
+      echo "$sb:"
+      print_branches
+    else
+      echo "$sb: unreachable — stale remote, or not a clone sandbox? (sbx ls)"
+    fi
+  done
+}
+
+cmd_pull() {
+  force=
+  case ${1:-} in -f|--force) force=1; shift ;; esac
+  resolve_sandbox "${1:-}"
+  check_workspace
+  fetch_sandbox || die "cannot reach sandbox '$sb' — is it running? (sbx ls; use 'sbx-agents harvest $sb' if stopped)"
+  br=${2:-}
+  if [ -z "$br" ]; then
+    sb_head_branch
+    br=$hb
+    [ -n "$br" ] || die "cannot tell which branch the sandbox has checked out (detached HEAD?) — pass one of: $(git for-each-ref "refs/remotes/sandbox-$sb" --format='%(refname:lstrip=3)' | tr '\n' ' ')"
+  fi
+  ref=refs/remotes/sandbox-$sb/$br
+  git rev-parse -q --verify "$ref" >/dev/null || die "sandbox '$sb' has no branch '$br'"
+  lbr=sbx/$sb/$br
+  wt=$(dirname "$top")/$repo-wt/$sb-$(printf %s "$br" | tr / -)
+  sync_worktree() {
+    git -C "$wt" merge --ff-only "$ref" >/dev/null 2>&1 && return 0
+    # Non-fast-forward: the agent amended or rebased commits we already
+    # pulled. Following the rewrite is the normal case — refuse only when the
+    # reset could lose something local: uncommitted changes, or a tip the
+    # sandbox ref never pointed at (i.e. commits made here, not in the
+    # sandbox; past tips are read from the remote-tracking ref's reflog).
+    old=$(git -C "$wt" rev-parse --short HEAD)
+    if [ -z "$force" ]; then
+      [ -z "$(git -C "$wt" status --porcelain)" ] \
+        || die "sandbox '$sb' rewrote '$br', but the worktree has local changes — commit/stash them in $wt, or discard everything with: sbx-agents pull --force $sb $br"
+      git rev-list -g "$ref" 2>/dev/null | grep -qx "$(git -C "$wt" rev-parse HEAD)" \
+        || die "sandbox '$sb' rewrote '$br', but the worktree has local commits (tip $old was never a sandbox tip) — rescue them, or discard with: sbx-agents pull --force $sb $br"
+    fi
+    git -C "$wt" reset --hard "$ref" >/dev/null
+    echo "==> sandbox rewrote $br (amend/rebase) — worktree reset: $old -> $(git rev-parse --short "$ref")"
+  }
+  if [ -d "$wt" ]; then
+    sync_worktree
+  elif git show-ref -q --verify "refs/heads/$lbr"; then
+    mkdir -p "$(dirname "$wt")"
+    git worktree add "$wt" "$lbr"
+    sync_worktree
+  else
+    mkdir -p "$(dirname "$wt")"
+    git worktree add -b "$lbr" "$wt" "$ref"
+  fi
+  echo "==> $lbr at $(git rev-parse --short "$ref") — worktree: $wt"
+}
+
+cmd_push() {
+  resolve_sandbox "${1:-}"
+  check_workspace
+  br=${2:-}
+  [ -z "$br" ] || git show-ref -q --verify "refs/heads/$br" \
+    || die "no local branch '$br' to push"
+  # Push into the daemon is impossible by design (no receive-pack); the
+  # equivalent is a fetch from the live host mount, run inside the sandbox.
+  sbx exec "$sb" -- sh -c "
+    [ -e /run/sandbox/source/.git ] || { echo 'not a --clone sandbox (no /run/sandbox/source)' >&2; exit 3; }
+    git -C \"$top\" remote get-url host >/dev/null 2>&1 \
+      || git -C \"$top\" remote add host /run/sandbox/source
+    git -C \"$top\" fetch host $br" \
+    || die "fetch inside sandbox '$sb' failed"
+  echo "==> sandbox $sb now sees your commits${br:+ on $br} — tell the agent to run: git rebase host/${br:-<branch>}"
+}
+
+# Removes the worktree(s) + local sbx/$1/* branch(es) (all, or just $2).
+# $3=1 forces past a dirty worktree or unmerged branch. $4=1 (used by
+# `clean`, whose whole point is this) dies when nothing matched; `rm` passes
+# 0 since having nothing to tear down there is not an error.
+teardown_worktrees() {
+  sb=$1 br=${2:-} force=${3:-} strict=${4:-1}
+  branches=$(git for-each-ref "refs/heads/sbx/$sb/${br}" --format='%(refname:lstrip=2)')
+  if [ -z "$branches" ]; then
+    [ "$strict" = 0 ] && return 0
+    die "nothing to clean: no local branch sbx/$sb/${br:-*}"
+  fi
+  for lbr in $branches; do
+    b=${lbr#sbx/$sb/}
+    wt=$(dirname "$top")/$repo-wt/$sb-$(printf %s "$b" | tr / -)
+    if [ -d "$wt" ]; then
+      git worktree remove ${force:+--force} "$wt" 2>/dev/null \
+        || die "worktree $wt has local changes — commit/stash them, or re-run with --force"
+      echo "==> removed worktree $wt"
+    fi
+    # -d treats "merged into upstream" (= the sandbox saw these commits) as
+    # merged, so a plain re-pulled branch deletes fine even before you merge
+    # it; only commits made locally on top require --force.
+    if [ -n "$force" ]; then git branch -q -D "$lbr"
+    else
+      git branch -q -d "$lbr" \
+        || die "branch $lbr has commits the sandbox never saw — merge them, or re-run with --force"
+    fi
+    echo "==> deleted branch $lbr"
+  done
+  rmdir "$(dirname "$top")/$repo-wt" 2>/dev/null || true
+}
+
+# Drops the sbx-managed remote and any stale fetch refs for sandbox $1 —
+# nothing will refresh them once the sandbox is gone, and a crash can leave
+# them behind.
+drop_sandbox_remote() {
+  git remote remove "sandbox-$1" 2>/dev/null || true
+  git for-each-ref "refs/remotes/sandbox-$1" --format='%(refname)' \
+    | while read -r r; do git update-ref -d "$r"; done
+}
+
+cmd_clean() {
+  force=
+  case ${1:-} in -f|--force) force=1; shift ;; esac
+  if [ -n "${1:-}" ]; then
+    sb=${1#sandbox-}
+  else
+    # No remote to resolve from (the sandbox is often already removed) —
+    # infer from the sbx/* branches pull created.
+    set -- $(git for-each-ref 'refs/heads/sbx' --format='%(refname:lstrip=3)' | cut -d/ -f1 | sort -u)
+    case $# in
+      1) sb=$1 ;;
+      0) die "no sbx/* branches to clean" ;;
+      *) die "sbx/* branches exist for several sandboxes ($*) — pass one" ;;
+    esac
+  fi
+  teardown_worktrees "$sb" "${2:-}" "$force" 1
+  # A still-existing sandbox may reuse this remote later; only drop it once
+  # the sandbox itself is gone.
+  [ -n "$(sbx_state "$sb")" ] || drop_sandbox_remote "$sb"
+}
+
+cmd_rm() {
+  force=
+  case ${1:-} in -f|--force) force=1; shift ;; esac
+  [ $# -ge 1 ] || die "rm needs a sandbox name (sbx ls)"
+  sb=${1#sandbox-}
+  check_workspace
+  teardown_worktrees "$sb" "" "$force" 0
+  echo "==> sbx rm $sb"
+  sbx rm "$sb" || echo "warn: sbx rm failed — sandbox may already be gone" >&2
+  drop_sandbox_remote "$sb"
+  echo "==> $sb fully removed"
+}
+
+cmd_harvest() {
+  sb=${1#sandbox-}
+  state=$(sbx_state "$sb")
+  [ -n "$state" ] || die "no sandbox named '$sb' (sbx ls)"
+  check_workspace
+  # `sbx exec` starts a stopped sandbox; the daemon port lands in `sbx ls`
+  # moments later (no remote is re-added on exec — sandbox_target handles it).
+  sbx exec "$sb" -- true >/dev/null 2>&1 || die "cannot start sandbox '$sb'"
+  n=0
+  until fetch_sandbox 2>/dev/null; do
+    n=$((n + 1))
+    [ "$n" -lt 5 ] || die "started '$sb' but its git daemon is unreachable"
+    sleep 1
+  done
+  echo "$sb:"
+  print_branches
+  if [ "$state" != running ]; then
+    sbx stop "$sb" >/dev/null 2>&1 && echo "==> $sb stopped again" \
+      || echo "warn: failed to stop '$sb' again — sbx stop $sb" >&2
+  fi
+}
+
+# ── main ─────────────────────────────────────────────────────────────────────
+
+case $cmd in
+  issue)   cmd_issue "$@" ;;
+  ls)      cmd_ls ;;
+  pull)    cmd_pull "$@" ;;
+  push)    cmd_push "$@" ;;
+  harvest) [ $# -ge 1 ] || die "harvest needs a sandbox name (sbx ls)"; cmd_harvest "$@" ;;
+  clean)   cmd_clean "$@" ;;
+  rm)      cmd_rm "$@" ;;
+  *)       die "unknown command '$cmd' (see: sbx-agents --help)" ;;
+esac

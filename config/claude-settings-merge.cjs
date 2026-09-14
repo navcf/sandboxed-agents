@@ -1,8 +1,7 @@
-// Deep-merge the build-time settings snapshot (custom settings + rtk hooks)
-// into ~/.claude/settings.json. sbx rewrites settings.json unconditionally at
-// sandbox (re)create — bypass flags, model, theme — wiping everything baked.
-// Snapshot keys win on conflict; sbx-seeded keys the snapshot doesn't define
-// are preserved.
+// Deep-merge the build-time settings snapshot into ~/.claude/settings.json.
+// sbx rewrites settings.json unconditionally at sandbox (re)create — bypass
+// flags, model, theme — wiping everything baked. Snapshot keys win on
+// conflict; sbx-seeded keys the snapshot doesn't define are preserved.
 const fs = require('fs');
 const src = '/usr/local/share/sbx/claude-settings.json';
 const dst = process.env.HOME + '/.claude/settings.json';

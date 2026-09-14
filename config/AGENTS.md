@@ -1,56 +1,38 @@
 # Sandbox Agent Instructions
 
-You are in a Docker Sandbox: an Ubuntu container with the project workspace
-mounted at the same absolute path as on the host. The image bakes a full
-Node + Postgres dev stack; there is no Docker daemon, no display, and browser
-CDNs are blocked. Task-specific guides live in `/usr/local/share/sbx/docs/` —
-read the relevant one BEFORE working around an environment limitation.
+You are in a Docker Sandbox for `~/Projects/expedition`: an Ubuntu container
+with the project workspace mounted at the same absolute path as on the host.
+The image bakes a full Node + Postgres dev stack; there is no Docker daemon,
+no display, and browser CDNs are blocked. Task-specific guides live in
+`/usr/local/share/sbx/docs/` — read the relevant one BEFORE working around an
+environment limitation.
 
 ## Environment
 
-- The workspace was bootstrapped at launch by `devstack up` (Postgres 18 on
-  localhost:5432, `.env`, dependencies; migrate+seed only if the DB was
-  empty). If it warned or failed, fix that before installing anything or
-  running tests: `devstack status`, then `devstack up`. `devstack reset`
-  wipes and rebuilds the database — only use it deliberately.
-  Details (config keys, TLS, TZ gotcha): docs/devstack.md
+- PostgreSQL 17 is already running and migrated by the time you start — it's
+  started and schema-bootstrapped before any agent CLI launches, and
+  `pnpm manifest db migrate` runs at every launch on top of that. Use
+  `pnpm manifest db status`/`psql` for diagnostics; `pnpm manifest db reset`
+  is a deliberate, destructive rebuild — never run it automatically.
+  Details: docs/database.md
 - Never install docker or run `docker compose` — when project tooling shells
   out to Docker, route around it: docs/no-docker.md
 - Browser work is headless-only. Use the baked `playwright` CLI, never bare
   `npx playwright` (resolves a mismatched version), and never run
   `playwright install` (the download is blocked — report a pinned-version
-  mismatch to the user instead). Tests, screenshots, recordings: docs/testing.md
+  mismatch to the user instead). Use `pnpm manifest test [unit|api|e2e]` for
+  tests — it manages isolated schemas/servers itself. Screenshots,
+  recordings: docs/testing.md
 - Put artifacts the user should open (screenshots, videos, reports) under the
   workspace, e.g. `.local/artifacts/`.
 
-## Skills
-
-Skills come from the `navcf/nav-skills` git repo, not from this image, and were
-fast-forwarded at launch. Manage them with the `nav-skills` CLI: `list`, `sync`,
-`new <name> <user|model|both>`, `doctor`, `harvest`.
-
-- Edit the clone at `~/.local/share/nav-skills`, never `~/.codex/skills` — the
-  next sync overwrites the latter. Codex's own built-ins under
-  `~/.codex/skills/.system` are never touched.
-- Codex ignores `disable-model-invocation`; a user-only skill needs
-  `policy.allow_implicit_invocation: false` in its `agents/openai.yaml`.
-  `nav-skills doctor` checks this.
-- `nav-skills harvest` packages your edits as a patch for the user to review.
-  Never commit or push skill changes.
-
-## RTK — token-optimized CLI proxy
-
-No hooks are wired for Codex — prefix high-volume commands yourself:
-`rtk git status`, `rtk git diff`, `rtk grep <pattern>`, and so on.
-`rtk proxy <cmd>` runs a command unfiltered (debugging); `rtk gain` shows
-savings.
-
 ## GitNexus — code intelligence (MCP)
 
-The `gitnexus` MCP server connects to the HOST (host.docker.internal:4747)
-and the code-graph index lives there. Never run `gitnexus analyze` in the
-sandbox; if the index is stale or the server unreachable, ask the user to fix
-it on the host (`host-services.sh`) instead of retrying.
+The `gitnexus` MCP server connects to the HOST (host.docker.internal:4747),
+run as a docker-compose service in the repo, and the code-graph index lives
+there. Never run `gitnexus analyze` in the sandbox; if the index is stale or
+the server unreachable, ask the user to fix it on the host instead of
+retrying.
 
 - Before modifying a function/class/method:
   `impact({target: "symbolName", direction: "upstream"})` — report the blast
@@ -63,8 +45,8 @@ it on the host (`host-services.sh`) instead of retrying.
 
 ## Peer agents (MCP)
 
-`ask_agent({agent, prompt, workdir})` runs another sandboxed agent (claude,
-codex, or cursor) headlessly on the same workspace — it sees your uncommitted
+`ask_agent({agent, prompt, workdir})` runs another sandboxed agent (claude or
+codex) headlessly on the same workspace — it sees your uncommitted
 changes. Say exactly what it should return; pass your workspace root as
 `workdir`. A slow peer returns a job id — poll `get_agent_response({job_id})`
 until the real answer arrives (long reviews can take 30-60 min).
