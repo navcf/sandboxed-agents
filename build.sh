@@ -1,9 +1,11 @@
 #!/usr/bin/env sh
-# Build the template image(s) and push to Docker Hub.
-# Usage: ./build.sh [claude|codex|all]   (default: all)
-# IMAGE=... overrides the image ref for single-agent builds.
+# Build the template image(s) and push to a registry.
+# Usage: SBX_TEMPLATE_IMAGE=<registry>/<namespace>/sandbox-templates \
+#          ./build.sh [claude|codex|all]   (default: all)
+# IMAGE=<full-ref> overrides the image ref for a single-agent build instead.
 #
-# Targets ~/Projects/expedition specifically — see the Dockerfile.
+# Bakes a dev stack targeting one project workspace, configured at sandbox
+# creation via SBX_WORKSPACE — see the Dockerfile and README.
 set -eu
 cd "$(dirname "$0")"
 
@@ -16,7 +18,8 @@ for agent in $AGENTS; do
     codex)  tag=codex ;;
     *) echo "usage: ./build.sh [claude|codex|all]" >&2; exit 2 ;;
   esac
-  image=${IMAGE:-docker.io/navcf/sandbox-templates:$tag}
+  image=${IMAGE:-${SBX_TEMPLATE_IMAGE:+$SBX_TEMPLATE_IMAGE:$tag}}
+  [ -n "$image" ] || { echo "./build.sh: set SBX_TEMPLATE_IMAGE=<registry>/<namespace>/sandbox-templates (or IMAGE=<full-ref> for a single-agent build)" >&2; exit 1; }
 
   # Force claude's native-installer RUN / codex's npm RUN to actually
   # re-execute every build: their command text never changes, so without a
@@ -38,5 +41,5 @@ for agent in $AGENTS; do
 
   echo
   echo "Create a sandbox with:"
-  echo "  sbx create -t $image $agent ~/Projects/expedition"
+  echo "  sbx create -e SBX_WORKSPACE=\$SBX_WORKSPACE -t $image $agent \$SBX_WORKSPACE"
 done

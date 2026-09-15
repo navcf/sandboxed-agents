@@ -12,7 +12,11 @@
 #   gitnexus-codex          appends the host MCP entries to ~/.codex/config.toml
 set -u
 
-REPO=/Users/nav/Projects/expedition
+# Set at sandbox creation (`sbx create -e SBX_WORKSPACE=...`, as `sbx-agents`
+# and the README's manual examples do) to the same absolute path the
+# workspace is bind-mounted at, since a container can't otherwise discover
+# it.
+REPO=${SBX_WORKSPACE:-}
 PG_MAJOR=17
 PG_DATADIR="/var/lib/postgresql/${PG_MAJOR}/main"
 PG_LOG="/var/log/postgresql/postgresql-${PG_MAJOR}-main.log"
@@ -21,7 +25,7 @@ PG_LOG="/var/log/postgresql/postgresql-${PG_MAJOR}-main.log"
 # to download a package; every later install links from here instead. A
 # bind-mount sandbox, or one created without that mount, just gets an
 # ordinary local directory here — same correctness, no sharing.
-PNPM_STORE_DIR=/Users/nav/.cache/sbx-pnpm-store
+PNPM_STORE_DIR=${SBX_PNPM_STORE_DIR:-$HOME/.cache/sbx-pnpm-store}
 
 # Replaces a non-IANA inherited TZ (macOS "PDT7") with UTC. sbx forwards the
 # host's TZ verbatim, and an invalid zone makes every temporal-polyfill call
@@ -232,6 +236,7 @@ container_init() {
 launch() {
   agent=$1; shift
   fix_tz
+  [ -n "$REPO" ] || echo "[sbx-agent] warn: SBX_WORKSPACE not set — pass -e SBX_WORKSPACE=<workspace path> at sandbox creation; dev-stack bootstrap below will likely fail" >&2
   case "$agent" in
     claude)
       node /usr/local/share/sbx/gitnexus-mcp.cjs || echo 'warn: gitnexus MCP registration failed' >&2

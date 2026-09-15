@@ -1,14 +1,14 @@
 # Claude Code + Codex sandbox templates
 
 Custom [Docker Sandboxes](https://docs.docker.com/ai/sandboxes/) templates,
-targeting `~/Projects/expedition` specifically, with the gitnexus MCP server
-(host-connected) baked in and PostgreSQL 17 (pg_cron, extensions, schema —
-matching the project's own `postgres/Dockerfile`/`postgres/init-db.sql`)
-started and migrated before any agent CLI launches. No kits; config is fully
-in place before the agent launches. Point both agents at the same workspace
-to have them review each other's work: the workspace is the same bind-mount
-in every sandbox, and the default sandbox names (`claude-<workdir>`,
-`codex-<workdir>`) never collide.
+targeting a single project workspace you configure (`SBX_WORKSPACE`, see
+below), with the gitnexus MCP server (host-connected) baked in and
+PostgreSQL 17 (pg_cron, extensions, schema — matching the project's own
+`postgres/Dockerfile`/`postgres/init-db.sql`) started and migrated before any
+agent CLI launches. No kits; config is fully in place before the agent
+launches. Point both agents at the same workspace to have them review each
+other's work: the workspace is the same bind-mount in every sandbox, and the
+default sandbox names (`claude-<workdir>`, `codex-<workdir>`) never collide.
 
 ## Layout
 
@@ -26,14 +26,21 @@ in every sandbox, and the default sandbox names (`claude-<workdir>`,
 | `codex-shim.sh` | Baked to `/home/agent/.local/bin/codex` (shadows the npm-global binary via PATH order); delegates to `sbx-agent launch codex` |
 | `build.sh` | `docker build` → `docker push`, per agent or all |
 | `host-services.sh` | Self-contained host-side agent-bridge MCP server on :4748 (lets agents ask each other for reviews) |
-| `sbx-agents` | Host-side CLI, hardcoded to `~/Projects/expedition`: `issue` (launch/re-attach with a GitHub issue/PR preloaded), `ls`/`pull`/`push`/`harvest`/`clean` (sync `--clone` sandbox branches into worktrees), `rm` (destroy a sandbox + its worktree/branch) — see "Clone mode: syncing work" |
+| `sbx-agents` | Host-side CLI, configured via `SBX_WORKSPACE`/`SBX_GH_REPO` env vars (hardcoded to one repo per environment): `issue` (launch/re-attach with a GitHub issue/PR preloaded), `ls`/`pull`/`push`/`harvest`/`clean` (sync `--clone` sandbox branches into worktrees), `rm` (destroy a sandbox + its worktree/branch) — see "Clone mode: syncing work" |
 
 ## Workflow
 
+Set these once, e.g. in your shell profile:
+
 ```sh
-./build.sh          # build and push all images (or ./build.sh claude|codex)
+export SBX_WORKSPACE=$HOME/Projects/myrepo       # your project's absolute path
+export SBX_TEMPLATE_IMAGE=docker.io/you/sandbox-templates  # where build.sh pushes
+```
+
+```sh
+SBX_TEMPLATE_IMAGE=$SBX_TEMPLATE_IMAGE ./build.sh   # build and push all images (or ./build.sh claude|codex)
 ./host-services.sh  # on the host, in a separate terminal — agent-to-agent bridge on :4748
-(cd ~/Projects/expedition && docker compose --profile gitnexus up -d gitnexus)  # gitnexus MCP on :4747
+(cd "$SBX_WORKSPACE" && docker compose --profile gitnexus up -d gitnexus)  # gitnexus MCP on :4747
 
 # One-time: the sandbox proxy translates host.docker.internal to the host's
 # localhost and default-denies it — allow the two host MCP ports:
@@ -62,19 +69,21 @@ sbx policy allow network "js.stripe.com,api.stripe.com,m.stripe.network,r.stripe
 # nothing is baked into the images. (anthropic is likely already set up.)
 sbx secret set -g openai --oauth   # ChatGPT login for codex
 
-# First run creates the sandbox (from ~/Projects/expedition; flags only
-# matter at creation). Thereafter a bare `sbx run claude` / `sbx run codex`
-# re-attaches via the default sandbox name (<agent>-<workdir>).
+# First run creates the sandbox (from $SBX_WORKSPACE; flags only matter at
+# creation). Thereafter a bare `sbx run claude` / `sbx run codex` re-attaches
+# via the default sandbox name (<agent>-<workdir>).
 # `-e TZ=UTC`: `sbx-agent` replaces a non-IANA inherited TZ with UTC on its
 # own, but keep the flag for belt-and-suspenders. See "Dev stack" below.
-cd ~/Projects/expedition
-sbx create --clone --name claude-<issue-id> -e TZ=UTC -t docker.io/navcf/sandbox-templates:claude-code claude .
-sbx create --clone --name claude-<issue-id> -e TZ=UTC -t docker.io/navcf/sandbox-templates:codex codex .
+# `-e SBX_WORKSPACE=...`: tells the in-container sbx-agent (config/agent.sh)
+# the workspace's absolute path, since it can't otherwise discover it.
+cd "$SBX_WORKSPACE"
+sbx create --clone --name claude-<issue-id> -e TZ=UTC -e SBX_WORKSPACE="$SBX_WORKSPACE" -t "$SBX_TEMPLATE_IMAGE:claude-code" claude .
+sbx create --clone --name claude-<issue-id> -e TZ=UTC -e SBX_WORKSPACE="$SBX_WORKSPACE" -t "$SBX_TEMPLATE_IMAGE:codex" codex .
 
 ```
 
 Override the image ref with `IMAGE=... ./build.sh claude` (single-agent builds
-only).
+only) instead of `SBX_TEMPLATE_IMAGE`.
 
 ## Clone mode: syncing work
 
@@ -94,10 +103,11 @@ working tree. sbx already provides the plumbing in both directions:
   **commits** cross in either direction; the baked instructions tell agents to
   work on a branch and commit early.
 
-`sbx-agents` wraps that into five verbs. It's hardcoded to
-`~/Projects/expedition` (`Checkfront/expedition` on GitHub) — the only repo
-it knows about — so it works from any directory, no `--repo` flag or `cd`
-needed. Put it on your PATH: `ln -s "$PWD/sbx-agents" ~/.local/bin/sbx-agents`.
+`sbx-agents` wraps that into five verbs. It's hardcoded to one repo per
+environment — `$SBX_WORKSPACE` (GitHub repo `$SBX_GH_REPO`, or the
+workspace's `origin` remote if unset) — so it works from any directory, no
+`--repo` flag or `cd` needed. Put it on your PATH:
+`ln -s "$PWD/sbx-agents" ~/.local/bin/sbx-agents`.
 
 ```sh
 sbx-agents ls                    # every sandbox's branches + how far ahead of your HEAD
@@ -122,8 +132,8 @@ A typical session:
 ```sh
 sbx-agents issue claude 1234         # agent works the issue in its own clone
 sbx-agents ls                        # claude-1234: fix/payments … [3 ahead of HEAD]
-sbx-agents pull claude-1234          # → ../expedition-wt/claude-1234-fix-payments
-(cd ../expedition-wt/claude-1234-fix-payments && pnpm test)
+sbx-agents pull claude-1234          # → ../myrepo-wt/claude-1234-fix-payments
+(cd ../myrepo-wt/claude-1234-fix-payments && pnpm test)
 git commit …                         # meanwhile you commit on main
 sbx-agents push claude-1234 main     # then ask the agent to rebase onto host/main
 # happy with it: merge sbx/claude-1234/fix-payments as usual, then
@@ -148,9 +158,9 @@ image** — images are pushed to a registry, and a secret in a layer is
 published. Instead the host mounts a dedicated key directory at sandbox
 creation and `sbx-agent setup-ssh` installs it at launch.
 
-The key in `~/.ssh/sandbox` is currently registered as an **account-level SSH
-key** ("Checkfront - Sandboxes"), not a per-repo deploy key, so it reaches
-every repo on the account — nothing needs granting per repo. Note the
+The key in `~/.ssh/sandbox` can be registered as an **account-level SSH key**
+(given a descriptive name, e.g. "Sandboxes"), not a per-repo deploy key, so it
+reaches every repo on the account — nothing needs granting per repo. Note the
 trade-off that comes with it: an account key carries **write** access to
 everything you can push to, from inside a sandbox, whereas a deploy key would
 be scoped to one repo and can be read-only.
@@ -204,7 +214,7 @@ and the sandbox boots exactly as before, HTTPS-only. Verify with
 
 ## Dev stack
 
-The images bake `~/Projects/expedition`'s own dev stack — PostgreSQL 17
+The images bake the target project's own dev stack — PostgreSQL 17
 (`pg_cron`, `pg_stat_statements`, `btree_gin`, `pg_trgm`, `pgcrypto`,
 `unaccent`; schema layout matching `postgres/Dockerfile` /
 `postgres/init-db.sql` exactly), Node, TypeScript, and a real browser for
@@ -282,15 +292,16 @@ inside an installed workspace, `pnpm exec tsc` and `npx tsc` resolve
 globals exist for scratch `.ts` files, a repo before its install has run, and
 one-off scripts outside any workspace.
 
-Postgres is pinned to **17.7** to match expedition's own
+Postgres is pinned to **17.7** to match the target project's own
 `postgres/Dockerfile` (`FROM postgres:17.7`) — `pg_dump` output is not
 identical across majors, and `schema.sql` / the migration baseline assume 17.
 Don't commit schema dumps generated in a sandbox.
 
-`sslmode=require` (expedition's `DATABASE_SSL_MODE` default) only encrypts —
-it never verifies the cert or hostname (see `buildSslConfig()` in
-`libs/server/db/src/db.ts`) — so the self-signed cert the image issues needs
-no CA trust-store wiring, unlike a `verify-full` setup.
+`sslmode=require` (a common `DATABASE_SSL_MODE` default) only encrypts — it
+never verifies the cert or hostname — so the self-signed cert the image
+issues needs no CA trust-store wiring, unlike a `verify-full` setup. Adjust
+this section for whatever the target project's own connection config
+actually does.
 
 ## Stopping and resuming
 
@@ -371,9 +382,9 @@ calls (no review-of-review loops).
   `~/.codex/AGENTS.md`.
 - The workspace mounts at the same absolute path as on the host — never bake
   files under a workspace path (the mount would shadow them). Project-specific
-  skills belong in the workspace's own `.claude/skills`/`.agents/skills`
-  (expedition already has these), which each agent discovers natively —
-  nothing in this repo needs to deliver skills.
+  skills belong in the workspace's own `.claude/skills`/`.agents/skills` (the
+  target project may already have these), which each agent discovers
+  natively — nothing in this repo needs to deliver skills.
 - gitnexus itself never runs in the sandbox; MCP traffic goes to the host via
   `http://host.docker.internal:4747/api/mcp`.
 
@@ -402,7 +413,7 @@ calls (no review-of-review loops).
   container start (or sandbox stop/resume) re-runs the entrypoint.
 - **`postgres/init-db.sql` bootstrap failed**: this step warns to stderr
   rather than blocking the launch. Re-run it by hand: `sudo -u postgres psql
-  -f ~/Projects/expedition/postgres/init-db.sql`.
+  -f "$SBX_WORKSPACE/postgres/init-db.sql"`.
 - **`manifest db migrate` failed at launch**: non-fatal by design (the shims
   warn and continue). Diagnose with `pnpm manifest db status`, then re-run
   `pnpm manifest db migrate` by hand.

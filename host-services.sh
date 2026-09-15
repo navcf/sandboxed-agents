@@ -1,8 +1,8 @@
 #!/usr/bin/env sh
 # Host-side agent-bridge MCP HTTP server: 127.0.0.1:${AGENT_BRIDGE_PORT:-4748}.
 #
-# gitnexus runs separately, as a docker-compose service in
-# ~/Projects/expedition (`docker compose --profile gitnexus up -d gitnexus`);
+# gitnexus runs separately, as a docker-compose service in the project
+# workspace (`docker compose --profile gitnexus up -d gitnexus`);
 # this script no longer starts it. Sandboxes reach the bridge via
 # host.docker.internal; requires the one-time
 #   sbx policy allow network "localhost:4748"
@@ -115,7 +115,7 @@ async function resolveSandbox(agent, workdir) {
   if (rows.some((r) => r[0] === guess)) return guess;
   const have = rows.map((r) => `${r[0]} (${r[1]}: ${r[4] || '?'})`).join('; ') || 'none';
   throw new Error(`no ${agent} sandbox found for workspace ${workdir}. Existing sandboxes: ${have}. ` +
-    `Create one with: sbx run -t docker.io/navcf/sandbox-templates:<tag> ${agent} (from the workspace dir), or pass sandbox explicitly.`);
+    `Create one with: sbx run -t <your-template-image> ${agent} (from the workspace dir), or pass sandbox explicitly.`);
 }
 
 // ---- async job registry -------------------------------------------------
