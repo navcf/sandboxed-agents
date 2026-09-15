@@ -10,11 +10,11 @@ PNPM_VERSION=10.33.4
 TYPESCRIPT_VERSION=5.9.3
 TSX_VERSION=4.20.6
 PLAYWRIGHT_VERSION=1.58.2
-PG_VERSION=17.7        # matches expedition/postgres/Dockerfile (FROM postgres:17.7)
+PG_VERSION=17.7        # matches the target project's postgres/Dockerfile (FROM postgres:17.7)
 PG_MAJOR=17
 PG_PREFIX=/usr/local/pgsql
 PG_DATADIR=/var/lib/postgresql/${PG_MAJOR}/main
-PG_CRON_VERSION=1.6.4  # matches expedition/postgres/Dockerfile
+PG_CRON_VERSION=1.6.4  # matches the target project's postgres/Dockerfile
 
 # `artifacts` stage: official Node (Ubuntu's own lacks amaro/TS-strip
 # support), a global TS toolchain, and Playwright's browsers — all baked once
@@ -58,8 +58,8 @@ cmd_artifacts() {
 }
 
 # `common` stage: wires the copied artifacts onto PATH, builds PostgreSQL 17 +
-# pg_cron from source (matching expedition/postgres/Dockerfile), and installs
-# xvfb + Chromium's shared libs.
+# pg_cron from source (matching the target project's postgres/Dockerfile),
+# and installs xvfb + Chromium's shared libs.
 cmd_postgres() {
   for b in node npm npx; do ln -sf "/opt/node/bin/$b" "/usr/local/bin/$b"; done
   for b in pnpm tsc tsserver tsx playwright; do ln -sf "/opt/node-tools/bin/$b" "/usr/local/bin/$b"; done
@@ -123,9 +123,9 @@ cmd_postgres() {
   install -d -o postgres -g postgres /var/lib/postgresql /var/log/postgresql
   install -d -o postgres -g postgres -m 700 "${PG_DATADIR}"
 
-  # Self-signed cert, CN=postgres (matches expedition's own
-  # postgres/entrypoint.sh). No CA trust-store wiring needed — expedition's
-  # DATABASE_SSL_MODE=require only encrypts, it never verifies.
+  # Self-signed cert, CN=postgres (matches a common postgres/entrypoint.sh
+  # pattern). No CA trust-store wiring needed if the target project's own
+  # DATABASE_SSL_MODE=require only encrypts and never verifies — adjust if not.
   install -d -o postgres -g postgres -m 700 /var/lib/postgresql/ssl
   openssl req -new -x509 -days 3650 -nodes -text \
     -out /var/lib/postgresql/ssl/server.crt \

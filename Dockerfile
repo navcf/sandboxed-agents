@@ -1,7 +1,8 @@
 # syntax=docker/dockerfile:1
-# Docker Sandboxes templates for Claude Code and Codex, targeting
-# ~/Projects/expedition. Build via ./build.sh [claude|codex|all], which
-# runs `docker build --target <agent> --build-arg BASE_IMAGE=...`.
+# Docker Sandboxes templates for Claude Code and Codex, targeting a single
+# project workspace configured at sandbox creation via SBX_WORKSPACE (see
+# README). Build via ./build.sh [claude|codex|all], which runs
+# `docker build --target <agent> --build-arg BASE_IMAGE=...`.
 #
 # `artifacts` downloads everything agent-agnostic once (Node, TS toolchain,
 # Playwright browsers) and is shared via COPY --link. `common` adds Postgres

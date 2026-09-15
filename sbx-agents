@@ -1,12 +1,20 @@
 #!/usr/bin/env sh
-# Host-side CLI for sandboxed agents working on ~/Projects/expedition
-# (Checkfront/expedition on GitHub) — the only repo this tool knows about.
+# Host-side CLI for sandboxed agents working on one project — the repo at
+# $SBX_WORKSPACE — the only repo this tool knows about per environment.
 # Launches a sandbox on a GitHub issue/PR, and syncs git commits with its
 # `--clone` sandbox afterward.
 #
+# Configure via env vars (export in your shell profile):
+#   SBX_WORKSPACE       required — absolute path to the project (e.g.
+#                        $HOME/Projects/myrepo)
+#   SBX_GH_REPO         optional — owner/repo on GitHub; defaults to
+#                        $SBX_WORKSPACE's `origin` remote
+#   SBX_PNPM_STORE_DIR  optional — shared pnpm store path (default:
+#                        $HOME/.cache/sbx-pnpm-store)
+#
 # Usage: sbx-agents <command> [args...]
 #   issue    launch/re-attach a sandbox with a GitHub issue or PR preloaded
-#   ls       list expedition's clone sandboxes and their branches
+#   ls       list this project's clone sandboxes and their branches
 #   pull     fetch a sandbox's branch into a local worktree
 #   push     make a sandbox's clone see your host commits
 #   harvest  fetch from a stopped sandbox, then stop it again
@@ -16,13 +24,12 @@
 # `sbx-agents <command> --help` (or with no command) shows full usage.
 set -eu
 
-WORKSPACE=/Users/nav/Projects/expedition
-GH_REPO=Checkfront/expedition
+WORKSPACE=${SBX_WORKSPACE:-}
 # Shared pnpm store, mounted into every sandbox `issue` creates (see
 # config/agent.sh, which points `pnpm install --store-dir` at this same
 # path) — one host-wide package cache instead of every fresh --clone
 # sandbox downloading its own copy.
-PNPM_STORE_DIR=/Users/nav/.cache/sbx-pnpm-store
+PNPM_STORE_DIR=${SBX_PNPM_STORE_DIR:-$HOME/.cache/sbx-pnpm-store}
 
 die() { echo "sbx-agents: $*" >&2; exit 1; }
 
@@ -30,8 +37,9 @@ usage() {
   cat <<'EOF'
 usage: sbx-agents <command> [args...]
 
-All commands operate on ~/Projects/expedition (Checkfront/expedition on
-GitHub) regardless of the current directory.
+All commands operate on $SBX_WORKSPACE regardless of the current directory
+(set it once, e.g. export SBX_WORKSPACE=$HOME/Projects/myrepo; GitHub repo
+defaults to that workspace's origin remote, override with $SBX_GH_REPO).
 
   issue [--no-clone] [--prep-only] AGENT ISSUE_OR_PR [SBX_RUN_FLAGS...]
       Fetch a GitHub issue or PR and launch `sbx run` with the sandbox named
@@ -53,7 +61,7 @@ GitHub) regardless of the current directory.
       defaults, applied at sandbox creation: --clone, and for claude/codex
       also the baked template (your own -t wins). Extra dirs are mounted
       when they exist: $SBX_ISSUE_NOTES_DIR (default
-      /Users/nav/Documents/Notes; set it empty to skip) and
+      $HOME/Documents/Notes; set it empty to skip) and
       ~/.ssh/sandbox:ro (GitHub SSH key — see README "GitHub over SSH").
 
       Re-running with the same AGENT and id re-attaches to the existing
@@ -62,7 +70,7 @@ GitHub) regardless of the current directory.
       examples:
         sbx-agents issue claude 1234                 # sandbox claude-1234
         sbx-agents issue claude 88 --no-clone        # bind-mount sandbox
-        sbx-agents issue codex https://github.com/Checkfront/expedition/pull/42
+        sbx-agents issue codex https://github.com/<owner>/<repo>/pull/42
 
   ls
       Fetch every --clone sandbox of this repo and show each one's branches
@@ -112,6 +120,10 @@ EOF
 case $1 in -h|--help|help) usage; exit 0 ;; esac
 cmd=$1
 shift
+
+[ -n "$WORKSPACE" ] || die "set SBX_WORKSPACE to your project directory absolute path, e.g. export SBX_WORKSPACE=\$HOME/Projects/myrepo"
+GH_REPO=${SBX_GH_REPO:-$(git -C "$WORKSPACE" remote get-url origin 2>/dev/null | sed -E 's#^git@github\.com:##; s#^https://github\.com/##; s#\.git$##')}
+[ -n "$GH_REPO" ] || die "could not determine GitHub repo from $WORKSPACE's origin remote — set SBX_GH_REPO=owner/repo"
 
 # Every command targets this one repo regardless of the caller's cwd.
 cd "$WORKSPACE" 2>/dev/null || die "workspace not found: $WORKSPACE"
@@ -242,12 +254,13 @@ $task"
   if sbx ls -q 2>/dev/null | grep -qx "$sandbox"; then
     echo "==> sandbox $sandbox already exists; creation flags ignored"
   else
-    # claude/codex use this repo's baked template; other agents use sbx's
-    # stock image.
+    # claude/codex use this repo's baked template (set SBX_TEMPLATE_IMAGE to
+    # the repo you pushed it to, e.g. docker.io/you/sandbox-templates); other
+    # agents, or when it's unset, use sbx's stock image.
     template=
     case $agent in
-      claude) template=docker.io/navcf/sandbox-templates:claude-code ;;
-      codex)  template=docker.io/navcf/sandbox-templates:codex ;;
+      claude) [ -n "${SBX_TEMPLATE_IMAGE:-}" ] && template="$SBX_TEMPLATE_IMAGE:claude-code" ;;
+      codex)  [ -n "${SBX_TEMPLATE_IMAGE:-}" ] && template="$SBX_TEMPLATE_IMAGE:codex" ;;
     esac
     for arg in "$@"; do
       case $arg in
@@ -262,7 +275,7 @@ $task"
     # to, the dedicated GitHub SSH key dir consumed by `sbx-agent setup-ssh`
     # (read-only), and the shared pnpm store (read-write — every sandbox
     # adds newly-downloaded packages back to it), created on first use.
-    notes=${SBX_ISSUE_NOTES_DIR-/Users/nav/Documents/Notes}
+    notes=${SBX_ISSUE_NOTES_DIR-$HOME/Documents/Notes}
     mkdir -p "$PNPM_STORE_DIR"
     set -- "$@" "$agent" "$workspace"
     [ -n "$notes" ] && [ -d "$notes" ] && set -- "$@" "$notes"
@@ -270,6 +283,10 @@ $task"
     set -- "$@" "$PNPM_STORE_DIR"
     [ -z "$template" ] || set -- -t "$template" "$@"
     [ -z "$clone" ] || set -- --clone "$@"
+    # Hands the container's sbx-agent (config/agent.sh) the same absolute
+    # paths this script just resolved, since it can't know them otherwise.
+    set -- -e SBX_WORKSPACE="$workspace" -e SBX_PNPM_STORE_DIR="$PNPM_STORE_DIR" "$@"
+    [ -n "$notes" ] && [ -d "$notes" ] && set -- -e SBX_NOTES_DIR="$notes" "$@"
     set -- create --name "$sandbox" "$@"
     echo "==> sbx $*" | head -c 300; echo
     sbx "$@"
@@ -308,7 +325,7 @@ sbx_state() { # STATUS column for sandbox $1, empty if unknown
   sbx ls 2>/dev/null | awk -v n="$1" '$1 == n { print $3 }'
 }
 
-# Die early when sandbox $sb exists but isn't one of expedition's — otherwise
+# Die early when sandbox $sb exists but isn't one of this repo's — otherwise
 # the daemon rejects the fetch with a misleading "repository not exported".
 # The primary workspace is the first path column in its `sbx ls` row (later
 # paths are extra mounts like Notes or the SSH key dir).

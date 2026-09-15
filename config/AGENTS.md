@@ -1,7 +1,7 @@
 # Sandbox Agent Instructions
 
-You are in a Docker Sandbox for `~/Projects/expedition`: an Ubuntu container
-with the project workspace mounted at the same absolute path as on the host.
+You are in a Docker Sandbox: an Ubuntu container with the project workspace
+mounted at the same absolute path as on the host.
 The image bakes a full Node + Postgres dev stack; there is no Docker daemon,
 no display, and browser CDNs are blocked. Task-specific guides live in
 `/usr/local/share/sbx/docs/` — read the relevant one BEFORE working around an
@@ -68,8 +68,9 @@ only your COMMITS. Work on a branch and commit early and often.
 
 ## Conventions
 
-- Write all plans in /Users/nav/Documents/Notes in Orgmode format — never
-  markdown or txt.
+- Write all plans in Orgmode format — never markdown or txt — under
+  `$SBX_NOTES_DIR` if that directory exists, otherwise under `.local/notes/`
+  in the workspace.
 - Never push changes or post comments to GitHub — prepare the content and ask
   for review first. If git-over-SSH fails (`Permission denied (publickey)` or
   a hang), no key was mounted: report it; never generate keys, edit `~/.ssh`,
