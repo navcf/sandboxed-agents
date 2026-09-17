@@ -377,7 +377,8 @@ calls (no review-of-review loops).
   `~/.codex/config.toml` unconditionally at sandbox (re)create, so
   `codex-shim.sh` — at `/home/agent/.local/bin/codex`, which precedes the real
   npm-global binary on PATH, no `mv` needed — delegates to `sbx-agent launch
-  codex`, which appends the gitnexus block (grep-guarded, never a rewrite)
+  codex`, which rewrites the gitnexus/agent-bridge blocks (stripped and
+  re-appended on every launch, so a stale URL or setting never survives)
   before `exec`ing the real codex. Global instructions live at
   `~/.codex/AGENTS.md`.
 - The workspace mounts at the same absolute path as on the host — never bake
@@ -401,10 +402,12 @@ calls (no review-of-review loops).
   `/home/agent/.local/bin/claude` is the shim script (and `claude-real` exists
   beside it), and re-assert manually with
   `node /usr/local/share/sbx/gitnexus-mcp.cjs`.
-- **gitnexus missing from codex's MCP servers**: `~/.codex/config.toml` was
-  re-seeded and the shim didn't run — check that
-  `/home/agent/.local/bin/codex` is the shim script, and re-assert manually
-  with `sbx-agent gitnexus-codex`.
+- **gitnexus missing from codex's MCP servers, or its URL/timeout looks
+  stale**: `~/.codex/config.toml` was re-seeded and the shim didn't run — check
+  that `/home/agent/.local/bin/codex` is the shim script, and re-assert
+  manually with `sbx-agent gitnexus-codex` (safe to re-run any time — it
+  strips and re-appends the `[mcp_servers.gitnexus]`/`[mcp_servers.agents]`
+  blocks rather than skipping when they already exist).
 - **Postgres isn't up / `pnpm manifest db status` shows nothing listening**:
   `sbx-agent container-init` runs once as the image's `ENTRYPOINT`, before the
   agent CLI — check `pg_isready -h localhost -p 5432` and
@@ -427,9 +430,8 @@ calls (no review-of-review loops).
   (restart `./host-services.sh`), or the caller passed a large explicit
   `wait_seconds` that exceeds its own client timeout — claude's is
   `MCP_TOOL_TIMEOUT=3600000` in `config/claude-settings.json`, codex's is
-  `tool_timeout_sec = 3600` set by `sbx-agent gitnexus-codex` (60s default if
-  the config block predates that setting — the grep-guarded append never
-  upgrades an existing `[mcp_servers.agents]` block). Stick to the default
+  `tool_timeout_sec = 3600` set by `sbx-agent gitnexus-codex`, which rewrites
+  the block on every launch so this can't go stale. Stick to the default
   `wait_seconds` and poll. A job
   erroring with "peer run killed after 3600s" genuinely exceeded the 1h cap —
   split the review into narrower prompts (one subsystem or one diff per call).

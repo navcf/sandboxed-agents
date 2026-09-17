@@ -9,7 +9,7 @@
 #                          bootstrap the schema, migrate, exec the real binary
 #   setup-ssh              GitHub-over-SSH key provisioning (also runs from `launch`)
 #   codex-settings          appends config/codex-config.toml to ~/.codex/config.toml
-#   gitnexus-codex          appends the host MCP entries to ~/.codex/config.toml
+#   gitnexus-codex          rewrites the host MCP entries in ~/.codex/config.toml
 set -u
 
 # Set at sandbox creation (`sbx create -e SBX_WORKSPACE=...`, as `sbx-agents`
@@ -95,29 +95,33 @@ codex_settings() {
   grep -qFx "$marker" "$cfg" || { echo; cat "$src"; } >> "$cfg"
 }
 
-# Grep-guarded append of the host MCP entries (gitnexus + agent-bridge) to
-# ~/.codex/config.toml.
+# Idempotent rewrite of the host MCP entries (gitnexus + agent-bridge) in
+# ~/.codex/config.toml: strips any existing [mcp_servers.gitnexus]/[mcp_servers.agents]
+# blocks (wherever their url/tool_timeout_sec came from — a stale image, a
+# manual edit) and re-appends the current values, so a re-run always
+# converges instead of leaving a first-seeded block permanently stale.
 gitnexus_codex() {
   cfg="$HOME/.codex/config.toml"
   mkdir -p "$(dirname "$cfg")"
   touch "$cfg"
-  if ! grep -q '^\[mcp_servers\.gitnexus\]' "$cfg"; then
-    cat >> "$cfg" <<'EOF'
+  awk '
+    /^\[mcp_servers\.(gitnexus|agents)\]$/ { skip = 1; blank = 0; next }
+    /^\[/ { skip = 0 }
+    skip { next }
+    /^$/ { blank++; next }
+    { for (i = 0; i < blank; i++) print ""; blank = 0; print }
+  ' "$cfg" > "$cfg.tmp" && mv "$cfg.tmp" "$cfg"
+  cat >> "$cfg" <<'EOF'
 
 [mcp_servers.gitnexus]
 type = "http"
 url = "http://host.docker.internal:4747/api/mcp"
-EOF
-  fi
-  if ! grep -q '^\[mcp_servers\.agents\]' "$cfg"; then
-    cat >> "$cfg" <<'EOF'
 
 [mcp_servers.agents]
 type = "http"
 url = "http://host.docker.internal:4748/mcp"
 tool_timeout_sec = 3600
 EOF
-  fi
 }
 
 # Registers /run/sandbox/source (clone mode's live read-only host mount) as
